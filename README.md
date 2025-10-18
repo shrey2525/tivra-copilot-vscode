@@ -162,7 +162,7 @@ The extension will auto-discover your AWS services!
 
 - 🐛 Report issues: [GitHub Issues](https://github.com/shrey2525/tivra-debugmind-vscode/issues)
 - 💬 Feature requests: [GitHub Discussions](https://github.com/shrey2525/tivra-debugmind-vscode/discussions)
-- 📧 Email: support@tivra.ai
+- 📧 Email: info@tivra.ai
 
 ## License
 

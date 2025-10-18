@@ -1,8 +1,8 @@
 {
   "name": "tivra-debugmind",
   "displayName": "Tivra DebugMind",
-  "description": "AI-powered AWS debugging that automatically fixes production errors in VS Code. Analyze CloudWatch Logs, Metrics, and X-Ray traces, then apply AI-generated fixes with one click.",
-  "version": "0.1.2-beta",
+  "description": "AI-powered AWS debugging copilot. Chat with an AI that analyzes CloudWatch logs and fixes your code automatically.",
+  "version": "0.2.0-beta",
   "publisher": "tivra",
   "license": "MIT",
   "repository": {
@@ -19,17 +19,16 @@
   },
   "categories": [
     "Debuggers",
-    "Other"
+    "Machine Learning"
   ],
   "keywords": [
     "aws",
     "cloudwatch",
     "debugging",
-    "observability",
-    "lambda",
-    "xray",
+    "ai",
     "copilot",
-    "ai"
+    "lambda",
+    "logs"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -39,72 +38,32 @@
     "commands": [
       {
         "command": "tivra.connectAWS",
-        "title": "Tivra: Connect to AWS"
+        "title": "Tivra: Connect to AWS",
+        "icon": "$(cloud)"
       },
       {
-        "command": "tivra.analyzeService",
-        "title": "Tivra: Analyze AWS Service"
+        "command": "tivra.startDebugging",
+        "title": "Tivra: Start Debugging",
+        "icon": "$(bug)"
       },
       {
-        "command": "tivra.generateFix",
-        "title": "Tivra: Generate Fix with Claude"
-      },
-      {
-        "command": "tivra.showRuntimeContext",
-        "title": "Tivra: Show Runtime Context"
-      },
-      {
-        "command": "tivra.navigateToError",
-        "title": "Tivra: Navigate to Error"
-      },
-      {
-        "command": "tivra.refreshServices",
-        "title": "Tivra: Refresh Services"
+        "command": "tivra.openCopilot",
+        "title": "Tivra: Open DebugMind Copilot",
+        "icon": "$(robot)"
       }
     ],
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "tivra-copilot",
-          "title": "Tivra CoPilot"
-        }
-      ]
-    },
-    "views": {
-      "tivra-copilot": [
-        {
-          "id": "tivra.runtimeContext",
-          "name": "Runtime Context",
-          "type": "webview"
-        },
-        {
-          "id": "tivra.errors",
-          "name": "AWS Errors"
-        }
-      ]
-    },
     "configuration": {
-      "title": "Tivra CoPilot",
+      "title": "Tivra DebugMind",
       "properties": {
         "tivra.apiUrl": {
           "type": "string",
           "default": "https://copilot.tivra.ai",
-          "description": "Tivra CoPilot API URL"
+          "description": "Tivra DebugMind API URL"
         },
-        "tivra.autoRefresh": {
-          "type": "boolean",
-          "default": true,
-          "description": "Auto-refresh runtime context"
-        },
-        "tivra.refreshInterval": {
-          "type": "number",
-          "default": 300000,
-          "description": "Refresh interval in ms (default: 5 min)"
-        },
-        "tivra.notifyOnErrors": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show notifications on new errors"
+        "tivra.awsRegion": {
+          "type": "string",
+          "default": "us-east-1",
+          "description": "AWS Region"
         }
       }
     }
@@ -113,17 +72,14 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package",
-    "publish": "vsce publish"
+    "package": "vsce package --allow-missing-repository"
   },
   "dependencies": {
-    "axios": "^1.6.0",
-    "ws": "^8.14.0"
+    "axios": "^1.6.0"
   },
   "devDependencies": {
     "@types/vscode": "^1.85.0",
     "@types/node": "^20.10.0",
-    "@types/ws": "^8.5.0",
     "typescript": "^5.3.0",
     "@vscode/vsce": "^2.22.0"
   }
