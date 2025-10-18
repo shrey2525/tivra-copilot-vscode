@@ -11,6 +11,12 @@ export class DebugCopilot {
   private _messages: ChatMessage[] = [];
   private _conversationContext: ConversationContext;
   private _apiUrl: string;
+  private _awsConnectionState: {
+    step: 'ACCESS_KEY' | 'SECRET_KEY' | 'REGION';
+    accessKeyId?: string;
+    secretAccessKey?: string;
+    region?: string;
+  } | null = null;
 
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, apiUrl: string) {
     this._panel = panel;
@@ -44,6 +50,53 @@ export class DebugCopilot {
     );
 
     this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
+
+    // Show welcome message
+    this.showWelcomeMessage();
+  }
+
+  /**
+   * Show welcome message with instructions
+   */
+  private async showWelcomeMessage() {
+    try {
+      // Check AWS connection status
+      const statusResponse = await axios.get(`${this._apiUrl}/api/aws/status`);
+      const isConnected = statusResponse.data?.connected || false;
+
+      if (isConnected) {
+        this.addMessage({
+          type: 'ai',
+          content: `👋 Welcome to **Tivra DebugMind**!\n\nI'm your AI debugging copilot powered by Claude. I can help you:\n\n• 🔍 **Analyze errors** from AWS CloudWatch logs\n• 🎯 **Identify root causes** automatically with AI\n• 🛠️ **Generate & apply fixes** directly to your code\n• 📊 **Debug across services** in your AWS infrastructure\n\n**AWS Status**: ✅ Connected\n\n### Quick Start\n\n**To analyze a service:**\nRun command: \`Tivra: Start Debugging\`\n\n**Try these example questions:**\n\n🔹 "What are the most common errors in my services?"\n🔹 "Analyze the latest Lambda function failures"\n🔹 "Show me errors from the last hour"\n🔹 "Help me debug a timeout issue"\n🔹 "What's causing high error rates?"\n\n💬 Or just ask me anything about debugging!`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Show me recent errors in my AWS services',
+            'Analyze Lambda function errors',
+            'Help me debug a timeout issue',
+            'What are common causes of 5xx errors?'
+          ]
+        });
+      } else {
+        this.addMessage({
+          type: 'ai',
+          content: `👋 Welcome to **Tivra DebugMind**!\n\nI'm your AI debugging copilot for AWS services, powered by Claude.\n\n**⚠️ AWS Not Connected**\n\nTo start analyzing real errors, I need your AWS credentials.\n\n### Quick Connect:\n\nClick the button below and I'll guide you through connecting to AWS step-by-step.\n\n### What I can do once connected:\n\n• 🔍 Analyze CloudWatch logs and errors\n• 🎯 Identify root causes with AI\n• 🛠️ Generate and apply code fixes automatically\n• 📊 Debug across Lambda, ECS, EC2, and more\n\n**In the meantime, try asking:**\n\n🔹 "What types of errors can you help debug?"\n🔹 "How do you analyze CloudWatch logs?"\n🔹 "What AWS services do you support?"\n🔹 "Connect me to AWS"\n\n💬 I'm here to help with any debugging questions!`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Connect me to AWS',
+            'What types of errors can you help debug?',
+            'How do you analyze CloudWatch logs?',
+            'What AWS services do you support?'
+          ]
+        });
+      }
+    } catch (error) {
+      // If status check fails, show generic welcome
+      this.addMessage({
+        type: 'ai',
+        content: `👋 Welcome to **Tivra DebugMind**!\n\nI'm your AI debugging copilot. Let me help you debug your AWS services!\n\n**To get started:**\n1. Connect to AWS: \`Tivra: Connect to AWS\`\n2. Start debugging: \`Tivra: Start Debugging\`\n\nOr just ask me any debugging questions!`,
+        timestamp: new Date()
+      });
+    }
   }
 
   public static createOrShow(extensionUri: vscode.Uri, apiUrl: string) {
@@ -67,6 +120,107 @@ export class DebugCopilot {
 
     DebugCopilot.currentPanel = new DebugCopilot(panel, extensionUri, apiUrl);
     return DebugCopilot.currentPanel;
+  }
+
+  /**
+   * Start AWS connection flow through chat
+   */
+  private async startAWSConnectionFlow() {
+    this.addMessage({
+      type: 'ai',
+      content: `Great! Let's connect to AWS. I'll need three pieces of information:\n\n**Step 1 of 3: AWS Access Key ID**\n\nPlease enter your AWS Access Key ID.\n\n💡 You can find this in your AWS Console under IAM > Security Credentials.\n\n*Type your Access Key ID below:*`,
+      timestamp: new Date()
+    });
+
+    // Set state to wait for access key
+    this._awsConnectionState = { step: 'ACCESS_KEY' };
+  }
+
+  /**
+   * Handle AWS credential input
+   */
+  private async handleAWSCredentialInput(input: string) {
+    if (!this._awsConnectionState) return false;
+
+    switch (this._awsConnectionState.step) {
+      case 'ACCESS_KEY':
+        this._awsConnectionState.accessKeyId = input;
+        this._awsConnectionState.step = 'SECRET_KEY';
+        this.addMessage({
+          type: 'ai',
+          content: `✅ Access Key ID saved!\n\n**Step 2 of 3: AWS Secret Access Key**\n\nPlease enter your AWS Secret Access Key.\n\n🔒 Don't worry, this will be securely stored and not displayed.\n\n*Type your Secret Access Key below:*`,
+          timestamp: new Date()
+        });
+        return true;
+
+      case 'SECRET_KEY':
+        this._awsConnectionState.secretAccessKey = input;
+        this._awsConnectionState.step = 'REGION';
+        this.addMessage({
+          type: 'ai',
+          content: `✅ Secret Access Key saved!\n\n**Step 3 of 3: AWS Region**\n\nWhich AWS region would you like to connect to?\n\nExamples: \`us-east-1\`, \`us-west-2\`, \`eu-west-1\`\n\n*Type your AWS region below:*`,
+          timestamp: new Date(),
+          suggestedPrompts: ['us-east-1', 'us-west-2', 'eu-west-1', 'ap-south-1']
+        });
+        return true;
+
+      case 'REGION':
+        this._awsConnectionState.region = input;
+        await this.connectToAWS(
+          this._awsConnectionState.accessKeyId!,
+          this._awsConnectionState.secretAccessKey!,
+          this._awsConnectionState.region
+        );
+        this._awsConnectionState = null;
+        return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Connect to AWS with provided credentials
+   */
+  private async connectToAWS(accessKeyId: string, secretAccessKey: string, region: string) {
+    this.addMessage({
+      type: 'system',
+      content: `🔄 Connecting to AWS...`,
+      timestamp: new Date()
+    });
+
+    try {
+      const response = await axios.post(`${this._apiUrl}/api/aws/connect`, {
+        accessKeyId,
+        secretAccessKey,
+        region
+      });
+
+      if (response.data.success) {
+        this.addMessage({
+          type: 'ai',
+          content: `🎉 **Successfully connected to AWS!**\n\nRegion: **${region}**\n\nI'm now ready to help you debug your AWS services!\n\n**What would you like to do?**\n\n• Analyze errors from CloudWatch logs\n• Debug a specific service\n• Check for common issues\n\nJust ask me anything!`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Show me recent errors in my services',
+            'Analyze Lambda function failures',
+            'Help me debug a timeout issue',
+            'What services are available?'
+          ]
+        });
+      } else {
+        throw new Error(response.data.error || 'Connection failed');
+      }
+    } catch (error: any) {
+      this.addMessage({
+        type: 'ai',
+        content: `❌ **Failed to connect to AWS**\n\nError: ${error.response?.data?.error || error.message}\n\nPlease check your credentials and try again.\n\nWould you like to:\n• Try connecting again\n• Get help with AWS credentials`,
+        timestamp: new Date(),
+        suggestedPrompts: [
+          'Connect me to AWS',
+          'How do I get AWS credentials?'
+        ]
+      });
+    }
   }
 
   /**
@@ -213,6 +367,70 @@ export class DebugCopilot {
       content: text
     });
 
+    // Check if we're in AWS credential input flow
+    if (this._awsConnectionState) {
+      const handled = await this.handleAWSCredentialInput(text);
+      if (handled) return;
+    }
+
+    // Check if user is asking to connect to AWS
+    const connectKeywords = ['connect', 'aws', 'credentials', 'access key', 'set up', 'setup'];
+    const lowerText = text.toLowerCase();
+    const isConnectRequest = connectKeywords.some(keyword => lowerText.includes(keyword)) &&
+                             (lowerText.includes('aws') || lowerText.includes('connect'));
+
+    if (isConnectRequest) {
+      // Check if already connected
+      try {
+        const statusResponse = await axios.get(`${this._apiUrl}/api/aws/status`);
+        if (statusResponse.data?.connected) {
+          this.addMessage({
+            type: 'ai',
+            content: `✅ You're already connected to AWS!\n\nYour AWS credentials are configured and ready to use.\n\n**What would you like to do?**\n\n• Analyze errors in a service\n• Check CloudWatch logs\n• Debug a specific issue\n\nJust ask me and I'll help!`,
+            timestamp: new Date(),
+            suggestedPrompts: [
+              'Show me recent errors in my services',
+              'Analyze Lambda function failures',
+              'Help me debug a timeout issue'
+            ]
+          });
+          return;
+        }
+      } catch (error) {
+        // Continue with connection flow
+      }
+
+      // Start AWS connection flow
+      this.startAWSConnectionFlow();
+      return;
+    }
+
+    // Before processing any other prompt, verify AWS connection
+    try {
+      const statusResponse = await axios.get(`${this._apiUrl}/api/aws/status`);
+      if (!statusResponse.data?.connected) {
+        this.addMessage({
+          type: 'ai',
+          content: `⚠️ **AWS Not Connected**\n\nTo analyze logs and debug AWS services, I need to connect to your AWS account first.\n\nPlease click below to get started:`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Connect me to AWS'
+          ]
+        });
+        return;
+      }
+    } catch (error) {
+      this.addMessage({
+        type: 'ai',
+        content: `⚠️ **Unable to verify AWS connection**\n\nI couldn't check your AWS connection status. Please make sure:\n\n1. Backend server is running\n2. You're connected to the internet\n\nThen try connecting to AWS:`,
+        timestamp: new Date(),
+        suggestedPrompts: [
+          'Connect me to AWS'
+        ]
+      });
+      return;
+    }
+
     // Show AI is thinking
     this.addMessage({
       type: 'ai',
@@ -222,10 +440,13 @@ export class DebugCopilot {
     });
 
     try {
-      // Send to AI with full context
-      const aiResponse = await axios.post(`${this._apiUrl}/api/ai/chat`, {
+      // Send to AI with full context using the correct /api/chat endpoint
+      const aiResponse = await axios.post(`${this._apiUrl}/api/chat`, {
         message: text,
-        context: this._conversationContext
+        context: {
+          ...this._conversationContext,
+          connectedServices: this._conversationContext.service ? [this._conversationContext.service.name] : []
+        }
       });
 
       const { response, suggestedFix } = aiResponse.data;
@@ -551,6 +772,31 @@ export class DebugCopilot {
       color: var(--vscode-button-secondaryForeground);
     }
 
+    .suggested-prompts {
+      margin-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .prompt-button {
+      padding: 10px 14px;
+      background: rgba(102, 126, 234, 0.1);
+      color: var(--vscode-foreground);
+      border: 1px solid rgba(102, 126, 234, 0.3);
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+      text-align: left;
+      transition: all 0.2s;
+    }
+
+    .prompt-button:hover {
+      background: rgba(102, 126, 234, 0.2);
+      border-color: rgba(102, 126, 234, 0.5);
+      transform: translateX(4px);
+    }
+
     .input-container {
       padding: 16px;
       background-color: var(--vscode-editor-background);
@@ -649,6 +895,15 @@ export class DebugCopilot {
               </button>
             </div>\`;
           }
+
+          if (msg.suggestedPrompts && msg.suggestedPrompts.length > 0) {
+            html += \`<div class="suggested-prompts">\`;
+            msg.suggestedPrompts.forEach(prompt => {
+              const escapedPrompt = prompt.replace(/'/g, "&apos;").replace(/"/g, "&quot;");
+              html += \`<button class="prompt-button" onclick='sendPrompt("\${escapedPrompt}")'>\${prompt}</button>\`;
+            });
+            html += \`</div>\`;
+          }
         }
 
         messageDiv.innerHTML = html;
@@ -686,6 +941,11 @@ export class DebugCopilot {
       vscode.postMessage({ type: 'rejectFix' });
     }
 
+    function sendPrompt(prompt) {
+      messageInput.value = prompt;
+      sendMessage();
+    }
+
     sendButton.addEventListener('click', sendMessage);
     messageInput.addEventListener('keypress', (e) => {
       if (e.key === 'Enter') sendMessage();
@@ -710,6 +970,7 @@ interface ChatMessage {
   content: string;
   timestamp: Date;
   suggestedFix?: CodeFix;
+  suggestedPrompts?: string[];
   isTyping?: boolean;
 }
 

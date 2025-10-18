@@ -2,7 +2,7 @@
   "name": "tivra-debugmind",
   "displayName": "Tivra DebugMind",
   "description": "AI-powered AWS debugging copilot. Chat with an AI that analyzes CloudWatch logs and fixes your code automatically.",
-  "version": "0.2.0-beta",
+  "version": "0.2.1-beta",
   "publisher": "tivra",
   "license": "MIT",
   "repository": {
@@ -37,18 +37,8 @@
   "contributes": {
     "commands": [
       {
-        "command": "tivra.connectAWS",
-        "title": "Tivra: Connect to AWS",
-        "icon": "$(cloud)"
-      },
-      {
-        "command": "tivra.startDebugging",
-        "title": "Tivra: Start Debugging",
-        "icon": "$(bug)"
-      },
-      {
         "command": "tivra.openCopilot",
-        "title": "Tivra: Open DebugMind Copilot",
+        "title": "Tivra DebugMind",
         "icon": "$(robot)"
       }
     ],
