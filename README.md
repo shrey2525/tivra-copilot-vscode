@@ -1,37 +1,38 @@
-# Tivra CoPilot for VS Code
+# Tivra DebugMind for VS Code
 
-**Bring AWS runtime context directly into VS Code and Claude Code.**
+**AI-powered AWS debugging that automatically fixes production errors in VS Code.**
 
-Close the observability loop: AWS errors → Tivra analysis → Claude Code generates fixes.
+Close the observability loop: AWS errors → AI analysis → Automatic code fixes.
 
 ## Philosophy
 
-> "Where Claude leaves off, we start - we pass runtime context back to Claude"
+> "From error to fix in 10 minutes, not 4 hours"
 
-Tivra CoPilot captures real-time AWS runtime context (CloudWatch Logs, Metrics, X-Ray traces) and passes it directly to Claude Code in your IDE, enabling Claude to generate fixes with full knowledge of production errors + your complete codebase.
+Tivra DebugMind captures real-time AWS runtime context (CloudWatch Logs, Metrics, X-Ray traces) and uses AI to automatically generate and apply code fixes directly in your VS Code workspace.
 
 ## Features
 
-- **🔗 AWS Integration**: Connect to AWS with credentials, auto-discover Lambda/ECS/RDS services
+- **🔗 AWS Integration**: Connect to AWS, auto-discover Lambda/ECS/RDS services  
 - **📊 Real-Time Monitoring**: Live error rates, metrics, and traces in VS Code
-- **🤖 Claude Code Integration**: Send comprehensive runtime context to Claude with one click
-- **🔍 Intelligent Navigation**: Jump from CloudWatch errors directly to source code
+- **🤖 Agentic Fix Generation**: AI automatically generates AND applies code fixes
+- **👀 Diff Preview**: Review changes before applying
+- **✨ One-Click Apply**: Fix applied directly to your codebase
+- **🔍 Intelligent Navigation**: Jump from CloudWatch errors to source code
 - **🚨 Error Diagnostics**: See production errors inline in your editor
 - **⚡ Auto-Refresh**: Automatic monitoring with configurable intervals
 - **✅ Zero Context Switching**: Everything in VS Code - no AWS Console needed
 
 ## Quick Start
 
-### 1. Install & Setup
+### 1. Install Extension
 
-1. Install Tivra CoPilot backend:
-   ```bash
-   cd tivra-copilot
-   npm install
-   npm start  # Runs on http://localhost:3001
-   ```
+Download the `.vsix` file from [GitHub Releases](https://github.com/shrey2525/tivra-debugmind-vscode/releases) and install:
 
-2. Install this VS Code extension (or load in dev mode)
+1. Open VS Code
+2. Press `Cmd+Shift+P` (Mac) or `Ctrl+Shift+P` (Windows/Linux)
+3. Type: `Extensions: Install from VSIX...`
+4. Select the downloaded `.vsix` file
+5. Reload VS Code
 
 ### 2. Connect to AWS
 
@@ -53,32 +54,13 @@ The extension will auto-discover your AWS services!
    - CloudWatch Metrics (error rate, latency, CPU/memory)
    - X-Ray Traces (distributed tracing, dependencies)
 
-### 4. Generate Fix with Claude
+### 4. Generate & Apply Fix Automatically
 
-1. After analysis, click **"Generate Fix with Claude"**
-2. Complete AWS runtime context is:
-   - Copied to clipboard
-   - Saved as `.tivra-context-{service}.md` in workspace
-   - Ready to paste into Claude Code
-3. Claude receives:
-   - Error patterns and counts
-   - Stack traces
-   - Metrics (error rate, latency percentiles)
-   - X-Ray traces
-   - AI-generated root cause analysis
-   - Suggested fix recommendations
-
-### 5. Claude Generates Fix
-
-Claude Code now has:
-- **Full codebase access** (via VS Code workspace)
-- **Complete runtime context** (from Tivra)
-
-Claude can:
-- Locate the exact file causing errors
-- Generate fixes with proper error handling
-- Add retry logic, logging, validation
-- Optimize based on metrics
+1. After analysis, click **"Generate Fix"**
+2. AI analyzes the complete AWS runtime context
+3. Preview the proposed code changes (side-by-side diff)
+4. Click **"Apply Fix"** to update your code
+5. Done! Code is ready to commit and deploy
 
 ## Complete Workflow Example
 
@@ -88,164 +70,106 @@ Claude can:
 
 2. VS Code Extension: "Tivra: Analyze AWS Service"
    └─ Selects "payment-processor"
-   └─ Fetches logs, metrics, traces
+   └─ Fetches logs, metrics, traces (10 seconds)
 
 3. Analysis Complete:
    ├─ Error Rate: 12.5%
    ├─ Root Cause: "DynamoDB version conflict due to race conditions"
-   └─ Click: "Generate Fix with Claude"
+   └─ Click: "Generate Fix"
 
-4. Context sent to Claude Code:
-   ├─ 89 DynamoDB errors with stack traces
-   ├─ P99 latency: 1200ms
-   ├─ Suggested fix: "Retry logic with exponential backoff"
-   └─ Full codebase access
+4. AI generates fix automatically:
+   ├─ Adds retry logic with exponential backoff
+   ├─ Implements proper error handling
+   ├─ Adds input validation
+   └─ Shows side-by-side diff preview
 
-5. Claude generates fix:
-   ├─ Adds retry mechanism to lambda/payment-processor/index.js
-   ├─ Implements exponential backoff
-   ├─ Adds CloudWatch logging
-   └─ Creates PR
+5. One-click apply:
+   ├─ Code updated in workspace
+   ├─ Ready to commit
+   └─ Total time: 10 minutes (vs 4 hours manual debugging)
+```
 
-6. Deploy & Validate:
-   └─ Error rate: 12.5% → 0.2% ✅
+## How It Works
 
-Total time: ~10 minutes | Manual effort: ~2 minutes | Context switches: 0
+### Traditional Way (4 hours)
+```
+1. Open AWS Console
+2. Search CloudWatch Logs manually
+3. Copy error messages
+4. Google stack traces
+5. Try fix #1 → Deploy → Wait → Still failing
+6. Try fix #2 → Deploy → Wait → Still failing
+7. Try fix #3 → Deploy → Wait → Success!
+   Total: 4 hours, 23 context switches, 6 deployments
+```
+
+### Tivra DebugMind Way (10 minutes)
+```
+1. VS Code: Analyze Service
+2. AI generates fix with full AWS context
+3. Preview diff → Apply fix
+4. Commit → Deploy → Success!
+   Total: 10 minutes, 0 context switches, 1 deployment
 ```
 
 ## Commands
 
-- `Tivra: Connect to AWS` - Connect AWS credentials
-- `Tivra: Analyze AWS Service` - Analyze specific service
-- `Tivra: Generate Fix with Claude` - Send context to Claude Code
-- `Tivra: Show Runtime Context` - Open runtime panel
-- `Tivra: Refresh Services` - Refresh service list
+- `Tivra: Connect to AWS` - Connect with AWS credentials
+- `Tivra: Analyze AWS Service` - Analyze a service for errors
+- `Tivra: Generate Fix` - AI generates and applies code fix
+- `Tivra: Show Runtime Context` - View detailed AWS analysis
+- `Tivra: Refresh Services` - Re-discover AWS services
 - `Tivra: Navigate to Error` - Jump to error in code
 
 ## Configuration
 
-Open VS Code Settings and search for "Tivra":
-
-- `tivra.apiUrl`: Tivra CoPilot API URL (default: `http://localhost:3001`)
-- `tivra.autoRefresh`: Auto-refresh runtime context (default: `true`)
-- `tivra.refreshInterval`: Refresh interval in ms (default: `300000` = 5min)
-- `tivra.notifyOnErrors`: Show notifications on errors (default: `true`)
-
-## Requirements
-
-- **Tivra CoPilot Backend**: Must be running on `localhost:3001`
-- **AWS Account**: With appropriate IAM permissions (CloudWatch, X-Ray, Lambda/ECS/RDS read access)
-- **Claude Code Extension**: Optional but recommended for AI-powered fixes
-
-## IAM Permissions
-
-Recommended read-only IAM policy:
-
 ```json
 {
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": [
-      "logs:FilterLogEvents",
-      "logs:DescribeLogGroups",
-      "cloudwatch:GetMetricData",
-      "cloudwatch:ListMetrics",
-      "xray:GetTraceSummaries",
-      "xray:GetServiceGraph",
-      "lambda:ListFunctions",
-      "ecs:ListServices",
-      "ecs:DescribeServices",
-      "rds:DescribeDBInstances"
-    ],
-    "Resource": "*"
-  }]
+  "tivra.apiUrl": "https://copilot.tivra.ai",
+  "tivra.autoRefresh": true,
+  "tivra.refreshInterval": 300000,
+  "tivra.notifyOnErrors": true
 }
 ```
 
-## Example Context Sent to Claude
+## Requirements
 
-```markdown
-# AWS Runtime Context for payment-processor (LAMBDA)
+- VS Code 1.85.0+
+- AWS account with:
+  - CloudWatch Logs read access
+  - CloudWatch Metrics read access
+  - X-Ray read access (optional)
+- AWS credentials (Access Key ID + Secret Access Key)
 
-## 🚨 Issue Summary
-**Root Cause**: DynamoDB conditional check failures due to version conflict
+## Privacy & Security
 
-**Confidence**: high
+- AWS credentials are stored securely in VS Code's Secret Storage
+- No data is stored on Tivra servers (only temporary analysis)
+- All code changes require your explicit approval
+- Full undo support via VS Code's built-in undo
 
-**Suggested Fix**: Implement retry logic with exponential backoff
+## Supported AWS Services
 
-## 📊 CloudWatch Metrics (Last Hour)
-- Error Rate: 12.5%
-- Error Count: 145
-- P99 Latency: 1200ms
+- ✅ AWS Lambda
+- ✅ Amazon ECS (Fargate & EC2)
+- ✅ Amazon RDS
+- ✅ API Gateway
+- 🔜 DynamoDB
+- 🔜 S3
+- 🔜 SQS/SNS
 
-## 📝 CloudWatch Logs - Top Errors
-### 1. ConditionalCheckFailedException (89 occurrences)
+## Feedback & Support
 
-**Stack Trace**:
-```
-ConditionalCheckFailedException: The conditional request failed
-    at Request.extractError (/var/task/node_modules/aws-sdk/lib/protocol/json.js:52:27)
-    at Request.callListeners (/var/task/node_modules/aws-sdk/lib/sequential_executor.js:106:20)
-    ...
-```
-
-## 🔍 X-Ray Distributed Traces
-- Total Traces: 1160
-- Error Traces: 145
-- 61% of errors from DynamoDB operations
-
-## 💡 AI Recommendations
-1. Implement retry logic with exponential backoff (Priority: high)
-2. Add CloudWatch alarms for error rate (Priority: medium)
-```
-
-## Troubleshooting
-
-**Extension not connecting to Tivra**:
-- Verify Tivra backend is running: `curl http://localhost:3001/api/aws/status`
-- Check extension logs: View → Output → Select "Tivra CoPilot"
-
-**No services found**:
-- Ensure AWS credentials have correct permissions
-- Check AWS region is correct
-- Try demo mode in Tivra: `USE_MOCK_DATA=true`
-
-**Claude Code not receiving context**:
-- Context is copied to clipboard and saved as `.tivra-context-{service}.md`
-- Manually paste into Claude Code chat
-- Reference the .md file directly in chat
-
-## Development
-
-To run extension in development mode:
-
-```bash
-cd tivra-copilot-vscode
-npm install
-npm run compile
-```
-
-Then press `F5` in VS Code to launch Extension Development Host.
-
-## Roadmap
-
-- [ ] WebSocket real-time updates from Tivra backend
-- [ ] Deployment validation (pre/post error rate comparison)
-- [ ] Multi-cloud support (Azure, GCP)
-- [ ] Custom dashboards in VS Code
-- [ ] Team collaboration features
+- 🐛 Report issues: [GitHub Issues](https://github.com/shrey2525/tivra-debugmind-vscode/issues)
+- 💬 Feature requests: [GitHub Discussions](https://github.com/shrey2525/tivra-debugmind-vscode/discussions)
+- 📧 Email: support@tivra.ai
 
 ## License
 
-MIT
-
-## Support
-
-- Issues: [GitHub Issues](https://github.com/your-org/tivra-copilot-vscode/issues)
-- Docs: [Tivra CoPilot Documentation](https://tivra.dev/docs)
+MIT License - see [LICENSE](LICENSE) for details
 
 ---
 
-**Built with the philosophy**: *Where Claude leaves off, we start - we pass runtime context back to Claude.* 🚀
+**Made with ❤️ by the Tivra team**
+
+*Closing the observability loop, one fix at a time.*
