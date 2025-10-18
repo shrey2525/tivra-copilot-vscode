@@ -1,0 +1,130 @@
+{
+  "name": "tivra-copilot",
+  "displayName": "Tivra CoPilot - AWS Runtime Context",
+  "description": "Connect AWS runtime context to AI assistants for intelligent debugging. Analyze CloudWatch Logs, Metrics, and X-Ray traces directly in VS Code.",
+  "version": "0.1.0-beta",
+  "publisher": "tivra",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_ORG/tivra-copilot-vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/YOUR_ORG/tivra-copilot-vscode/issues",
+    "email": "beta@tivra.dev"
+  },
+  "homepage": "https://github.com/YOUR_ORG/tivra-copilot-vscode#readme",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Debuggers",
+    "Other"
+  ],
+  "keywords": [
+    "aws",
+    "cloudwatch",
+    "debugging",
+    "observability",
+    "lambda",
+    "xray",
+    "copilot",
+    "ai"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "tivra.connectAWS",
+        "title": "Tivra: Connect to AWS"
+      },
+      {
+        "command": "tivra.analyzeService",
+        "title": "Tivra: Analyze AWS Service"
+      },
+      {
+        "command": "tivra.generateFix",
+        "title": "Tivra: Generate Fix with Claude"
+      },
+      {
+        "command": "tivra.showRuntimeContext",
+        "title": "Tivra: Show Runtime Context"
+      },
+      {
+        "command": "tivra.navigateToError",
+        "title": "Tivra: Navigate to Error"
+      },
+      {
+        "command": "tivra.refreshServices",
+        "title": "Tivra: Refresh Services"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tivra-copilot",
+          "title": "Tivra CoPilot"
+        }
+      ]
+    },
+    "views": {
+      "tivra-copilot": [
+        {
+          "id": "tivra.runtimeContext",
+          "name": "Runtime Context",
+          "type": "webview"
+        },
+        {
+          "id": "tivra.errors",
+          "name": "AWS Errors"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Tivra CoPilot",
+      "properties": {
+        "tivra.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:3001",
+          "description": "Tivra CoPilot API URL"
+        },
+        "tivra.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-refresh runtime context"
+        },
+        "tivra.refreshInterval": {
+          "type": "number",
+          "default": 300000,
+          "description": "Refresh interval in ms (default: 5 min)"
+        },
+        "tivra.notifyOnErrors": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show notifications on new errors"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "ws": "^8.14.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.10.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  }
+}
