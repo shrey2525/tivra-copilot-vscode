@@ -2,7 +2,7 @@
   "name": "tivra-copilot",
   "displayName": "Tivra CoPilot - AWS Runtime Context",
   "description": "Connect AWS runtime context to AI assistants for intelligent debugging. Analyze CloudWatch Logs, Metrics, and X-Ray traces directly in VS Code.",
-  "version": "0.1.0-beta",
+  "version": "0.1.1-beta",
   "publisher": "tivra",
   "license": "MIT",
   "repository": {
@@ -88,7 +88,7 @@
       "properties": {
         "tivra.apiUrl": {
           "type": "string",
-          "default": "http://localhost:3001",
+          "default": "https://copilot.tivra.ai",
           "description": "Tivra CoPilot API URL"
         },
         "tivra.autoRefresh": {
