@@ -7,13 +7,13 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR_ORG/tivra-copilot-vscode"
+    "url": "https://github.com/shrey2525/tivra-copilot-vscode"
   },
   "bugs": {
-    "url": "https://github.com/YOUR_ORG/tivra-copilot-vscode/issues",
+    "url": "https://github.com/shrey2525/tivra-copilot-vscode/issues",
     "email": "beta@tivra.dev"
   },
-  "homepage": "https://github.com/YOUR_ORG/tivra-copilot-vscode#readme",
+  "homepage": "https://github.com/shrey2525/tivra-copilot-vscode#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
