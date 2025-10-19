@@ -252,27 +252,6 @@ node index.js
 - 🔜 Google Cloud Platform
 - 🔜 Azure
 
-## Roadmap
-
-### v1.0 (Current)
-- ✅ EC2 and ECS service discovery
-- ✅ Log analysis and error detection
-- ✅ AI-powered root cause analysis
-- ✅ Conversational debugging interface
-
-### v2.0 (Planned)
-- Lambda and RDS support
-- Kubernetes integration
-- Multi-cloud support (GCP, Azure)
-- Performance metrics analysis
-- Distributed tracing
-
-### v3.0 (Future)
-- Automatic PR generation with fixes
-- Deployment rollback suggestions
-- Cost optimization recommendations
-- Custom alerting rules
-
 ## Use Cases
 
 **1. Debugging Production Errors**
