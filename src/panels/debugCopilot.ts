@@ -17,6 +17,9 @@ export class DebugCopilot {
     secretAccessKey?: string;
     region?: string;
   } | null = null;
+  private _monitoringInterval: NodeJS.Timeout | null = null;
+  private _isMonitoring: boolean = false;
+  private _awsServices: any[] = [];
 
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, apiUrl: string) {
     this._panel = panel;
@@ -65,27 +68,23 @@ export class DebugCopilot {
       const isConnected = statusResponse.data?.connected || false;
 
       if (isConnected) {
+        const region = statusResponse.data?.account?.region || 'unknown';
+
         this.addMessage({
           type: 'ai',
-          content: `👋 Welcome to **Tivra DebugMind**!\n\nI'm your AI debugging copilot powered by Claude. I can help you:\n\n• 🔍 **Analyze errors** from AWS CloudWatch logs\n• 🎯 **Identify root causes** automatically with AI\n• 🛠️ **Generate & apply fixes** directly to your code\n• 📊 **Debug across services** in your AWS infrastructure\n\n**AWS Status**: ✅ Connected\n\n### Quick Start\n\n**To analyze a service:**\nRun command: \`Tivra: Start Debugging\`\n\n**Try these example questions:**\n\n🔹 "What are the most common errors in my services?"\n🔹 "Analyze the latest Lambda function failures"\n🔹 "Show me errors from the last hour"\n🔹 "Help me debug a timeout issue"\n🔹 "What's causing high error rates?"\n\n💬 Or just ask me anything about debugging!`,
-          timestamp: new Date(),
-          suggestedPrompts: [
-            'Show me recent errors in my AWS services',
-            'Analyze Lambda function errors',
-            'Help me debug a timeout issue',
-            'What are common causes of 5xx errors?'
-          ]
+          content: `**AWS Connected** ✅\n\nRegion: ${region}\n\nFetching AWS services...`,
+          timestamp: new Date()
         });
+
+        // Fetch and display services
+        await this.fetchAWSServices(region);
       } else {
         this.addMessage({
           type: 'ai',
-          content: `👋 Welcome to **Tivra DebugMind**!\n\nI'm your AI debugging copilot for AWS services, powered by Claude.\n\n**⚠️ AWS Not Connected**\n\nTo start analyzing real errors, I need your AWS credentials.\n\n### Quick Connect:\n\nClick the button below and I'll guide you through connecting to AWS step-by-step.\n\n### What I can do once connected:\n\n• 🔍 Analyze CloudWatch logs and errors\n• 🎯 Identify root causes with AI\n• 🛠️ Generate and apply code fixes automatically\n• 📊 Debug across Lambda, ECS, EC2, and more\n\n**In the meantime, try asking:**\n\n🔹 "What types of errors can you help debug?"\n🔹 "How do you analyze CloudWatch logs?"\n🔹 "What AWS services do you support?"\n🔹 "Connect me to AWS"\n\n💬 I'm here to help with any debugging questions!`,
+          content: `**AWS Not Connected** ⚠️\n\nConnect to AWS to start debugging.`,
           timestamp: new Date(),
           suggestedPrompts: [
-            'Connect me to AWS',
-            'What types of errors can you help debug?',
-            'How do you analyze CloudWatch logs?',
-            'What AWS services do you support?'
+            'Connect me to AWS'
           ]
         });
       }
@@ -93,8 +92,11 @@ export class DebugCopilot {
       // If status check fails, show generic welcome
       this.addMessage({
         type: 'ai',
-        content: `👋 Welcome to **Tivra DebugMind**!\n\nI'm your AI debugging copilot. Let me help you debug your AWS services!\n\n**To get started:**\n1. Connect to AWS: \`Tivra: Connect to AWS\`\n2. Start debugging: \`Tivra: Start Debugging\`\n\nOr just ask me any debugging questions!`,
-        timestamp: new Date()
+        content: `Ready to debug AWS services.\n\nConnect to AWS to get started.`,
+        timestamp: new Date(),
+        suggestedPrompts: [
+          'Connect me to AWS'
+        ]
       });
     }
   }
@@ -182,6 +184,8 @@ export class DebugCopilot {
    * Connect to AWS with provided credentials
    */
   private async connectToAWS(accessKeyId: string, secretAccessKey: string, region: string) {
+    console.log(`[Tivra DebugMind] Connecting to AWS... Region: ${region}, API: ${this._apiUrl}`);
+
     this.addMessage({
       type: 'system',
       content: `🔄 Connecting to AWS...`,
@@ -195,22 +199,22 @@ export class DebugCopilot {
         region
       });
 
+      console.log('[Tivra DebugMind] AWS connection response:', response.data);
+
       if (response.data.success) {
         this.addMessage({
           type: 'ai',
-          content: `🎉 **Successfully connected to AWS!**\n\nRegion: **${region}**\n\nI'm now ready to help you debug your AWS services!\n\n**What would you like to do?**\n\n• Analyze errors from CloudWatch logs\n• Debug a specific service\n• Check for common issues\n\nJust ask me anything!`,
-          timestamp: new Date(),
-          suggestedPrompts: [
-            'Show me recent errors in my services',
-            'Analyze Lambda function failures',
-            'Help me debug a timeout issue',
-            'What services are available?'
-          ]
+          content: `**AWS Connected** ✅\n\nRegion: ${region}\n\nFetching AWS services...`,
+          timestamp: new Date()
         });
+
+        // Fetch AWS services
+        await this.fetchAWSServices(region);
       } else {
         throw new Error(response.data.error || 'Connection failed');
       }
     } catch (error: any) {
+      console.error('[Tivra DebugMind] AWS connection error:', error);
       this.addMessage({
         type: 'ai',
         content: `❌ **Failed to connect to AWS**\n\nError: ${error.response?.data?.error || error.message}\n\nPlease check your credentials and try again.\n\nWould you like to:\n• Try connecting again\n• Get help with AWS credentials`,
@@ -221,6 +225,286 @@ export class DebugCopilot {
         ]
       });
     }
+  }
+
+  /**
+   * Fetch AWS services after connection
+   */
+  private async fetchAWSServices(region: string) {
+    console.log(`[Tivra DebugMind] Fetching AWS services for region: ${region}`);
+
+    try {
+      const response = await axios.get(`${this._apiUrl}/api/aws/services/discover`);
+      console.log('[Tivra DebugMind] Services response:', response.data);
+
+      this._awsServices = response.data.services || [];
+      console.log(`[Tivra DebugMind] Found ${this._awsServices.length} services`);
+
+      if (this._awsServices.length > 0) {
+        // Build services list message
+        const servicesList = this._awsServices.map((service: any) =>
+          `• **${service.name}** (${service.type})`
+        ).join('\n');
+
+        this.addMessage({
+          type: 'ai',
+          content: `**AWS Services Found** ✅\n\n${servicesList}\n\nLive monitoring enabled. Watching for errors...`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Analyze errors in my services',
+            'Show me recent errors',
+            'Monitor for new errors'
+          ]
+        });
+
+        // Start automatic monitoring for demo
+        setTimeout(() => this.startAutomaticMonitoring(), 2000);
+      } else {
+        // No services found
+        this.addMessage({
+          type: 'ai',
+          content: `**No AWS Services Running** ℹ️\n\nNo Lambda functions or other services were found in region ${region}.\n\nPlease ensure you have:\n• Lambda functions deployed\n• Proper IAM permissions\n• Services in the selected region\n\nWould you like to try a different region?`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Connect to a different region',
+            'Help me deploy a Lambda function'
+          ]
+        });
+      }
+    } catch (error: any) {
+      console.error('[Tivra DebugMind] Error fetching services:', error);
+      this.addMessage({
+        type: 'ai',
+        content: `⚠️ **Could not fetch services**\n\nError: ${error.response?.data?.error || error.message}\n\nProceeding with manual service selection...`,
+        timestamp: new Date()
+      });
+    }
+  }
+
+  /**
+   * Start automatic monitoring for demo
+   */
+  private async startAutomaticMonitoring() {
+    this._isMonitoring = true;
+
+    // Poll every 10 seconds for demo
+    this._monitoringInterval = setInterval(async () => {
+      await this.checkForErrors();
+    }, 10000);
+
+    this.addMessage({
+      type: 'system',
+      content: '🔄 Monitoring AWS services...',
+      timestamp: new Date()
+    });
+  }
+
+  /**
+   * Check for errors in AWS services
+   */
+  private async checkForErrors() {
+    try {
+      // For demo, use a test service or the connected service
+      const response = await axios.post(`${this._apiUrl}/api/aws/logs/analyze`, {
+        serviceName: 'test-service',
+        serviceType: 'Lambda',
+        timeRange: {
+          start: Date.now() - 60000, // Last 1 minute
+          end: Date.now()
+        }
+      });
+
+      if (response.data.totalErrors > 0) {
+        // Error detected!
+        await this.handleDetectedError(response.data);
+
+        // Stop monitoring after first error (for demo)
+        this.stopMonitoring();
+      }
+    } catch (error) {
+      console.error('Monitoring error:', error);
+    }
+  }
+
+  /**
+   * Analyze all services for errors
+   */
+  private async analyzeAllServices() {
+    this.addMessage({
+      type: 'system',
+      content: '🔍 Analyzing all AWS services for errors...',
+      timestamp: new Date()
+    });
+
+    try {
+      // If no services discovered yet, fetch them first
+      if (this._awsServices.length === 0) {
+        const statusResponse = await axios.get(`${this._apiUrl}/api/aws/status`);
+        const region = statusResponse.data?.account?.region || 'us-east-1';
+        await this.fetchAWSServices(region);
+
+        if (this._awsServices.length === 0) {
+          this.addMessage({
+            type: 'ai',
+            content: `**No Services Found** ℹ️\n\nI couldn't find any AWS services in your account.\n\nPlease ensure you have services deployed and proper IAM permissions.`,
+            timestamp: new Date()
+          });
+          return;
+        }
+      }
+
+      let totalErrors = 0;
+      let errorsByService: any[] = [];
+
+      // Analyze each service for errors
+      for (const service of this._awsServices) {
+        try {
+          const response = await axios.post(`${this._apiUrl}/api/aws/logs/analyze`, {
+            serviceName: service.name,
+            serviceType: service.type,
+            timeRange: {
+              start: Date.now() - 3600000, // Last 1 hour
+              end: Date.now()
+            }
+          });
+
+          if (response.data.totalErrors > 0) {
+            totalErrors += response.data.totalErrors;
+            errorsByService.push({
+              service: service.name,
+              type: service.type,
+              errors: response.data.errors,
+              count: response.data.totalErrors
+            });
+          }
+        } catch (error) {
+          console.error(`Error analyzing ${service.name}:`, error);
+        }
+      }
+
+      // Display results
+      if (totalErrors === 0) {
+        this.addMessage({
+          type: 'ai',
+          content: `**No Errors Found!** ✅\n\nAll your services are running smoothly with no errors in the last hour.\n\n**Services Analyzed:**\n${this._awsServices.map(s => `• ${s.name} (${s.type})`).join('\n')}\n\nEverything looks perfect! 🎉`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Monitor for new errors',
+            'Check service metrics',
+            'Show service status'
+          ]
+        });
+      } else {
+        // Build error summary
+        let errorMessage = `**Errors Found** ⚠️\n\nFound ${totalErrors} error(s) across ${errorsByService.length} service(s) in the last hour.\n\n`;
+
+        errorsByService.forEach(svc => {
+          errorMessage += `### ${svc.service} (${svc.type})\n`;
+          errorMessage += `**${svc.count} error(s)**\n\n`;
+
+          // Show first 2 errors for each service
+          svc.errors.slice(0, 2).forEach((err: any, i: number) => {
+            errorMessage += `${i + 1}. ${err.message || 'Unknown error'}\n`;
+            if (err.timestamp) {
+              errorMessage += `   _${new Date(err.timestamp).toLocaleString()}_\n`;
+            }
+          });
+          errorMessage += '\n';
+        });
+
+        errorMessage += `\n**Generating RCA and fix...**`;
+
+        this.addMessage({
+          type: 'ai',
+          content: errorMessage,
+          timestamp: new Date()
+        });
+
+        // Call Claude for RCA
+        const firstError = errorsByService[0];
+        const rcaResponse = await axios.post(`${this._apiUrl}/api/chat`, {
+          message: `Analyze these errors and provide root cause analysis with fixes:\n\nService: ${firstError.service}\nType: ${firstError.type}\nErrors: ${JSON.stringify(firstError.errors.slice(0, 3), null, 2)}`,
+          context: {
+            recentErrors: firstError.errors,
+            connectedServices: this._awsServices.map(s => s.name),
+            conversationHistory: []
+          }
+        });
+
+        const { response, suggestedFix } = rcaResponse.data;
+
+        this.addMessage({
+          type: 'ai',
+          content: `## 🔍 Root Cause Analysis\n\n${response}`,
+          timestamp: new Date(),
+          suggestedFix: suggestedFix,
+          suggestedPrompts: [
+            'Create a PR with the fix',
+            'Show more error details',
+            'Check related services'
+          ]
+        });
+
+        // Store errors in context
+        this._conversationContext.recentErrors = errorsByService.flatMap(s => s.errors);
+      }
+
+    } catch (error: any) {
+      console.error('Error analyzing services:', error);
+      this.addMessage({
+        type: 'ai',
+        content: `❌ **Analysis Failed**\n\nError: ${error.response?.data?.error || error.message}\n\nPlease try again or check individual services manually.`,
+        timestamp: new Date()
+      });
+    }
+  }
+
+  /**
+   * Handle detected error and generate fix
+   */
+  private async handleDetectedError(errorData: any) {
+    this.addMessage({
+      type: 'ai',
+      content: `🚨 **Error Detected!**\n\nService: ${errorData.serviceName}\n\nErrors: ${errorData.totalErrors}\n\nAnalyzing and generating fix...`,
+      timestamp: new Date()
+    });
+
+    // Ask Claude to generate a fix
+    try {
+      const fixResponse = await axios.post(`${this._apiUrl}/api/chat`, {
+        message: `Generate a fix for this error: ${JSON.stringify(errorData.errors[0])}`,
+        context: {
+          recentErrors: errorData.errors,
+          conversationHistory: []
+        }
+      });
+
+      const { response, suggestedFix } = fixResponse.data;
+
+      this.addMessage({
+        type: 'ai',
+        content: response,
+        timestamp: new Date(),
+        suggestedFix: suggestedFix
+      });
+    } catch (error: any) {
+      this.addMessage({
+        type: 'ai',
+        content: `Found the error but couldn't generate a fix. Error: ${error.message}`,
+        timestamp: new Date()
+      });
+    }
+  }
+
+  /**
+   * Stop monitoring
+   */
+  private stopMonitoring() {
+    if (this._monitoringInterval) {
+      clearInterval(this._monitoringInterval);
+      this._monitoringInterval = null;
+    }
+    this._isMonitoring = false;
   }
 
   /**
@@ -431,6 +715,17 @@ export class DebugCopilot {
       return;
     }
 
+    // Check if user is asking to analyze errors
+    const analyzeKeywords = ['analyze', 'error', 'show', 'check', 'debug', 'find'];
+    const isAnalyzeRequest = analyzeKeywords.some(keyword => lowerText.includes(keyword)) &&
+                             (lowerText.includes('error') || lowerText.includes('service') || lowerText.includes('log'));
+
+    if (isAnalyzeRequest) {
+      // Automatically fetch logs and analyze
+      await this.analyzeAllServices();
+      return;
+    }
+
     // Show AI is thinking
     this.addMessage({
       type: 'ai',
@@ -615,6 +910,9 @@ export class DebugCopilot {
   }
 
   private _getHtmlForWebview(webview: vscode.Webview, extensionUri: vscode.Uri) {
+    const logoPath = vscode.Uri.joinPath(extensionUri, 'media', 'logo.png');
+    const logoUri = webview.asWebviewUri(logoPath);
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -635,11 +933,17 @@ export class DebugCopilot {
 
     .header {
       padding: 16px;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      background: linear-gradient(135deg, #1e90ff 0%, #0066cc 100%);
       color: white;
       display: flex;
       align-items: center;
       gap: 12px;
+    }
+
+    .logo {
+      width: 32px;
+      height: 32px;
+      border-radius: 4px;
     }
 
     .header h2 {
@@ -672,7 +976,7 @@ export class DebugCopilot {
     }
 
     .message.user {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      background: linear-gradient(135deg, #1e90ff 0%, #0066cc 100%);
       color: white;
       align-self: flex-end;
     }
@@ -680,7 +984,7 @@ export class DebugCopilot {
     .message.ai {
       background-color: var(--vscode-editor-selectionBackground);
       align-self: flex-start;
-      border-left: 3px solid #667eea;
+      border-left: 3px solid #1e90ff;
     }
 
     .message.system {
@@ -734,7 +1038,7 @@ export class DebugCopilot {
     .typing-indicator span {
       width: 8px;
       height: 8px;
-      background-color: #667eea;
+      background-color: #1e90ff;
       border-radius: 50%;
       animation: bounce 1.4s infinite;
     }
@@ -755,7 +1059,7 @@ export class DebugCopilot {
 
     .fix-button {
       padding: 10px 18px;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      background: linear-gradient(135deg, #1e90ff 0%, #0066cc 100%);
       color: white;
       border: none;
       border-radius: 8px;
@@ -781,9 +1085,9 @@ export class DebugCopilot {
 
     .prompt-button {
       padding: 10px 14px;
-      background: rgba(102, 126, 234, 0.1);
+      background: rgba(30, 144, 255, 0.1);
       color: var(--vscode-foreground);
-      border: 1px solid rgba(102, 126, 234, 0.3);
+      border: 1px solid rgba(30, 144, 255, 0.3);
       border-radius: 8px;
       cursor: pointer;
       font-size: 13px;
@@ -792,8 +1096,8 @@ export class DebugCopilot {
     }
 
     .prompt-button:hover {
-      background: rgba(102, 126, 234, 0.2);
-      border-color: rgba(102, 126, 234, 0.5);
+      background: rgba(30, 144, 255, 0.2);
+      border-color: rgba(30, 144, 255, 0.5);
       transform: translateX(4px);
     }
 
@@ -818,7 +1122,7 @@ export class DebugCopilot {
 
     #sendButton {
       padding: 12px 24px;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      background: linear-gradient(135deg, #1e90ff 0%, #0066cc 100%);
       color: white;
       border: none;
       border-radius: 24px;
@@ -832,9 +1136,9 @@ export class DebugCopilot {
 </head>
 <body>
   <div class="header">
-    <span>🤖</span>
+    <img src="${logoUri}" alt="Tivra Logo" class="logo" />
     <div>
-      <h2>Tivra DebugMind</h2>
+      <h2>DebugMind</h2>
       <div class="status">AI Debugging Assistant</div>
     </div>
   </div>
@@ -956,6 +1260,7 @@ export class DebugCopilot {
   }
 
   public dispose() {
+    this.stopMonitoring();
     DebugCopilot.currentPanel = undefined;
     this._panel.dispose();
     while (this._disposables.length) {

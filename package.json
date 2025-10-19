@@ -1,19 +1,19 @@
 {
   "name": "tivra-debugmind",
   "displayName": "Tivra DebugMind",
-  "description": "AI-powered AWS debugging copilot. Chat with an AI that analyzes CloudWatch logs and fixes your code automatically.",
-  "version": "0.2.1-beta",
+  "description": "AI debugging copilot for production services. Automatically fetches logs, analyzes errors, performs RCA, and suggests fixes.",
+  "version": "0.1.0",
   "publisher": "tivra",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/shrey2525/tivra-debugmind-vscode"
+    "url": "https://github.com/shrey2525/tivra-copilot-vscode"
   },
   "bugs": {
-    "url": "https://github.com/shrey2525/tivra-debugmind-vscode/issues",
+    "url": "https://github.com/shrey2525/tivra-copilot-vscode/issues",
     "email": "info@tivra.ai"
   },
-  "homepage": "https://github.com/shrey2525/tivra-debugmind-vscode#readme",
+  "homepage": "https://github.com/shrey2525/tivra-copilot-vscode#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -48,7 +48,7 @@
         "tivra.apiUrl": {
           "type": "string",
           "default": "https://copilot.tivra.ai",
-          "description": "Tivra DebugMind API URL"
+          "description": "Tivra DebugMind API URL (Production: https://copilot.tivra.ai | Local Dev: http://localhost:3001)"
         },
         "tivra.awsRegion": {
           "type": "string",
@@ -62,7 +62,7 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package --allow-missing-repository"
+    "package": "vsce package"
   },
   "dependencies": {
     "axios": "^1.6.0"

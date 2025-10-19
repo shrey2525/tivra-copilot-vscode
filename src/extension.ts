@@ -12,7 +12,9 @@ export async function activate(context: vscode.ExtensionContext) {
   console.log('🤖 Tivra DebugMind activated!');
 
   // Get API URL from config
+  // Production: https://copilot.tivra.ai | Local Dev: http://localhost:3001
   apiUrl = vscode.workspace.getConfiguration('tivra').get<string>('apiUrl') || 'https://copilot.tivra.ai';
+  console.log(`[Tivra DebugMind] API URL: ${apiUrl}`);
 
   // Create status bar
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
