@@ -18,6 +18,7 @@ Stop context-switching between log dashboards, consoles, and code. Tivra DebugMi
 - **🔍 Intelligent Log Analysis**: Automatically fetch and analyze production logs
 - **✅ Smart "No Errors" Detection**: Know when everything is working perfectly
 - **🤖 AI-Powered RCA**: Claude AI analyzes logs and provides actionable fixes
+- **✨ Agentic Code Fixes**: Apply AI-generated fixes directly in your IDE with one click
 - **⚡ Multi-Service Scanning**: Analyze errors across all services in one click
 - **💬 Conversational Interface**: Chat with AI about production errors
 - **🔄 Auto-Discovery**: Services automatically detected on startup
@@ -27,10 +28,15 @@ Stop context-switching between log dashboards, consoles, and code. Tivra DebugMi
 - **🔗 Production Debugging**: Connect to your cloud services and fetch real production logs
 - **🔍 Intelligent Log Analysis**: Automatically scan logs for errors, exceptions, and failures
 - **🤖 AI Root Cause Analysis**: Get detailed analysis of error patterns and suggested fixes
+- **✨ Agentic Code Fixes**: One-click application of AI-generated fixes directly in your workspace
+  - Review suggested code changes with inline diffs
+  - Apply fixes to your codebase instantly
+  - Full undo support
+  - No manual copy-pasting required
 - **✅ Zero False Positives**: Get positive feedback when services are healthy
 - **⚡ One-Click Analysis**: Scan all services for errors with a single click
 - **💬 Conversational Debugging**: Ask questions about errors and get instant insights
-- **✨ Context-Aware Fixes**: AI understands your service type and provides relevant solutions
+- **🔄 Automatic PR Creation**: Generate pull requests with fixes ready for review
 - **✅ Zero Context Switching**: Everything in VS Code - no log dashboards, no cloud consoles
 
 ## Why Tivra DebugMind?
@@ -156,13 +162,14 @@ Ask the copilot anything about production errors:
    ├─ Error: "NullPointerException in PaymentProcessor.java:142"
    ├─ Root Cause: "Missing null check for optional payment method"
    ├─ Suggested Fix: Add null validation and default handling
-   └─ Shows exact code changes needed
+   └─ Shows exact code changes with inline diff
 
-5. Apply the fix:
-   ├─ Review suggested changes
-   ├─ Apply to your code
-   ├─ Deploy the fixed code
-   └─ Total debugging time: 5 minutes (vs 2-4 hours manual)
+5. Apply the AI-generated fix:
+   ├─ Click "Apply Fix" button in the chat
+   ├─ Code automatically updated in your workspace
+   ├─ Review the changes with VS Code's diff view
+   ├─ Optionally click "Create PR" to generate pull request
+   └─ Deploy → Total debugging time: 5 minutes (vs 2-4 hours manual)
 ```
 
 ## How It Works
