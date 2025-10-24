@@ -2,9 +2,14 @@
   "name": "tivra-debugmind",
   "displayName": "Tivra DebugMind",
   "description": "AI debugging copilot for production services. Automatically fetches logs, analyzes errors, performs RCA, and suggests fixes.",
-  "version": "0.1.0",
-  "publisher": "tivra",
+  "version": "0.2.0",
+  "publisher": "shreychaturvedi",
   "license": "MIT",
+  "icon": "media/logo.png",
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/shrey2525/tivra-copilot-vscode"
@@ -19,7 +24,8 @@
   },
   "categories": [
     "Debuggers",
-    "Machine Learning"
+    "Machine Learning",
+    "Other"
   ],
   "keywords": [
     "aws",
@@ -28,7 +34,15 @@
     "ai",
     "copilot",
     "lambda",
-    "logs"
+    "logs",
+    "production",
+    "monitoring",
+    "error-tracking",
+    "rca",
+    "root-cause-analysis",
+    "ec2",
+    "ecs",
+    "devops"
   ],
   "activationEvents": [
     "onStartupFinished"

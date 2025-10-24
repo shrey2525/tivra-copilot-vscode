@@ -3,13 +3,19 @@
 
 import * as vscode from 'vscode';
 import { DebugCopilot } from './panels/debugCopilot';
+import { CredentialManager } from './utils/credential-manager';
 
 let copilot: DebugCopilot | undefined;
 let statusBarItem: vscode.StatusBarItem;
 let apiUrl: string;
+let credentialManager: CredentialManager;
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('🤖 Tivra DebugMind activated!');
+
+  // Initialize Credential Manager with VS Code SecretStorage
+  credentialManager = new CredentialManager(context.secrets);
+  console.log('[Tivra DebugMind] Credential Manager initialized');
 
   // Get API URL from config
   // Production: https://copilot.tivra.ai | Local Dev: http://localhost:3001
@@ -27,7 +33,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // Command: Open Debug Copilot
   context.subscriptions.push(
     vscode.commands.registerCommand('tivra.openCopilot', async () => {
-      copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl);
+      copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl, credentialManager);
     })
   );
 
@@ -56,7 +62,7 @@ export async function activate(context: vscode.ExtensionContext) {
 async function startDebugging(context: vscode.ExtensionContext) {
   // Open copilot if not already open
   if (!copilot) {
-    copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl);
+    copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl, credentialManager);
   }
 
   // Ask user to select service
@@ -138,7 +144,7 @@ function showWelcomeMessage(context: vscode.ExtensionContext) {
     if (choice === 'Connect to AWS') {
       vscode.commands.executeCommand('tivra.connectAWS');
     } else if (choice === 'Open Copilot') {
-      copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl);
+      copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl, credentialManager);
     }
   });
 }
