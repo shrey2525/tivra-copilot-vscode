@@ -3,6 +3,8 @@
 
 import * as vscode from 'vscode';
 import axios from 'axios';
+import { E2EEncryption } from '../utils/e2e-encryption';
+import { CredentialManager, AWSCredentials } from '../utils/credential-manager';
 
 export class DebugCopilot {
   public static currentPanel: DebugCopilot | undefined;
@@ -12,18 +14,37 @@ export class DebugCopilot {
   private _conversationContext: ConversationContext;
   private _apiUrl: string;
   private _awsConnectionState: {
-    step: 'ACCESS_KEY' | 'SECRET_KEY' | 'REGION';
+    step: 'ACCESS_KEY' | 'SECRET_KEY' | 'REGION' | 'EC2_LOG_GROUP';
     accessKeyId?: string;
     secretAccessKey?: string;
     region?: string;
+    serviceName?: string;
+    logGroupName?: string;
   } | null = null;
   private _monitoringInterval: NodeJS.Timeout | null = null;
   private _isMonitoring: boolean = false;
   private _awsServices: any[] = [];
+  private _errorAnalysisData: any = null; // Store analysis for context
+  private _servicesNeedingLogGroup: any[] = []; // Services that need manual log group config
 
-  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, apiUrl: string) {
+  // Real-time monitoring with polling only (WebSocket removed)
+  private _pollingInterval: NodeJS.Timeout | null = null;
+  private _lastPollTime: Map<string, number> = new Map(); // Track last poll time per service
+
+  // E2E Encryption
+  private _encryption: E2EEncryption | null = null;
+  private _encryptionEnabled: boolean = true; // Enable encryption by default
+
+  // Credential Manager
+  private _credentialManager: CredentialManager;
+
+  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, apiUrl: string, credentialManager: CredentialManager) {
     this._panel = panel;
     this._apiUrl = apiUrl;
+    this._credentialManager = credentialManager;
+
+    // Initialize E2E encryption
+    this._encryption = new E2EEncryption(apiUrl);
     this._conversationContext = {
       service: null,
       recentErrors: [],
@@ -63,7 +84,36 @@ export class DebugCopilot {
    */
   private async showWelcomeMessage() {
     try {
-      // Check AWS connection status
+      // First, try to migrate credentials from workspace config (for upgrading users)
+      await this._credentialManager.migrateFromWorkspaceConfig();
+
+      // Check for stored credentials in SecretStorage
+      const storedCredentials = await this._credentialManager.getCredentials();
+
+      if (storedCredentials) {
+        console.log(`[Tivra DebugMind] Found stored credentials (type: ${storedCredentials.type})`);
+
+        // Auto-connect using stored credentials
+        if (storedCredentials.type === 'manual') {
+          this.addMessage({
+            type: 'system',
+            content: `🔄 Auto-connecting to AWS using saved credentials...`,
+            timestamp: new Date()
+          });
+
+          await this.connectToAWS(
+            storedCredentials.accessKeyId,
+            storedCredentials.secretAccessKey,
+            storedCredentials.region
+          );
+          return;
+        } else if (storedCredentials.type === 'sso') {
+          // TODO: Handle SSO auto-connect when SSO flow is implemented
+          console.log('[Tivra DebugMind] SSO credentials found, but SSO auto-connect not yet implemented');
+        }
+      }
+
+      // If no stored credentials, check server AWS connection status
       const statusResponse = await axios.get(`${this._apiUrl}/api/aws/status`);
       const isConnected = statusResponse.data?.connected || false;
 
@@ -81,10 +131,11 @@ export class DebugCopilot {
       } else {
         this.addMessage({
           type: 'ai',
-          content: `**AWS Not Connected** ⚠️\n\nConnect to AWS to start debugging.`,
+          content: `**Connect to AWS** 🔗\n\nI'll help you connect using your AWS Access Keys.`,
           timestamp: new Date(),
           suggestedPrompts: [
-            'Connect me to AWS'
+            'Use Access Keys'
+            // 'Use SSO' // TODO: SSO flow - fix later
           ]
         });
       }
@@ -92,16 +143,17 @@ export class DebugCopilot {
       // If status check fails, show generic welcome
       this.addMessage({
         type: 'ai',
-        content: `Ready to debug AWS services.\n\nConnect to AWS to get started.`,
+        content: `**Connect to AWS** 🔗\n\nI'll help you connect using your AWS Access Keys.`,
         timestamp: new Date(),
         suggestedPrompts: [
-          'Connect me to AWS'
+          'Use Access Keys'
+          // 'Use SSO' // TODO: SSO flow - fix later
         ]
       });
     }
   }
 
-  public static createOrShow(extensionUri: vscode.Uri, apiUrl: string) {
+  public static createOrShow(extensionUri: vscode.Uri, apiUrl: string, credentialManager: CredentialManager) {
     const column = vscode.ViewColumn.Two;
 
     if (DebugCopilot.currentPanel) {
@@ -120,22 +172,8 @@ export class DebugCopilot {
       }
     );
 
-    DebugCopilot.currentPanel = new DebugCopilot(panel, extensionUri, apiUrl);
+    DebugCopilot.currentPanel = new DebugCopilot(panel, extensionUri, apiUrl, credentialManager);
     return DebugCopilot.currentPanel;
-  }
-
-  /**
-   * Start AWS connection flow through chat
-   */
-  private async startAWSConnectionFlow() {
-    this.addMessage({
-      type: 'ai',
-      content: `Great! Let's connect to AWS. I'll need three pieces of information:\n\n**Step 1 of 3: AWS Access Key ID**\n\nPlease enter your AWS Access Key ID.\n\n💡 You can find this in your AWS Console under IAM > Security Credentials.\n\n*Type your Access Key ID below:*`,
-      timestamp: new Date()
-    });
-
-    // Set state to wait for access key
-    this._awsConnectionState = { step: 'ACCESS_KEY' };
   }
 
   /**
@@ -146,7 +184,8 @@ export class DebugCopilot {
 
     switch (this._awsConnectionState.step) {
       case 'ACCESS_KEY':
-        this._awsConnectionState.accessKeyId = input;
+        this._awsConnectionState.accessKeyId = input.trim();
+        console.log('[DEBUG] Access Key ID stored, length:', this._awsConnectionState.accessKeyId.length);
         this._awsConnectionState.step = 'SECRET_KEY';
         this.addMessage({
           type: 'ai',
@@ -156,7 +195,8 @@ export class DebugCopilot {
         return true;
 
       case 'SECRET_KEY':
-        this._awsConnectionState.secretAccessKey = input;
+        this._awsConnectionState.secretAccessKey = input.trim();
+        console.log('[DEBUG] Secret Key stored, length:', this._awsConnectionState.secretAccessKey.length);
         this._awsConnectionState.step = 'REGION';
         this.addMessage({
           type: 'ai',
@@ -167,12 +207,28 @@ export class DebugCopilot {
         return true;
 
       case 'REGION':
-        this._awsConnectionState.region = input;
+        this._awsConnectionState.region = input.trim();
         await this.connectToAWS(
           this._awsConnectionState.accessKeyId!,
           this._awsConnectionState.secretAccessKey!,
           this._awsConnectionState.region
         );
+        this._awsConnectionState = null;
+        return true;
+
+      case 'EC2_LOG_GROUP':
+        const serviceName = this._awsConnectionState.serviceName!;
+        const logGroupName = input.trim();
+
+        this.addMessage({
+          type: 'ai',
+          content: `✅ **Log Group Configured**\n\nAnalyzing logs from \`${logGroupName}\` for **${serviceName}**...`,
+          timestamp: new Date()
+        });
+
+        // Analyze with the provided log group
+        await this.analyzeServiceWithLogGroup(serviceName, 'ec2', logGroupName);
+
         this._awsConnectionState = null;
         return true;
     }
@@ -185,6 +241,10 @@ export class DebugCopilot {
    */
   private async connectToAWS(accessKeyId: string, secretAccessKey: string, region: string) {
     console.log(`[Tivra DebugMind] Connecting to AWS... Region: ${region}, API: ${this._apiUrl}`);
+    console.log('[DEBUG] Access Key ID length:', accessKeyId?.length);
+    console.log('[DEBUG] Access Key ID value:', accessKeyId);
+    console.log('[DEBUG] Secret Key length:', secretAccessKey?.length);
+    console.log('[DEBUG] Region:', region);
 
     this.addMessage({
       type: 'system',
@@ -193,25 +253,66 @@ export class DebugCopilot {
     });
 
     try {
-      const response = await axios.post(`${this._apiUrl}/api/aws/connect`, {
-        accessKeyId,
-        secretAccessKey,
-        region
-      });
+      // Initialize E2E encryption if enabled
+      if (this._encryptionEnabled && this._encryption) {
+        console.log('[E2E] Establishing secure session...');
+        const sessionEstablished = await this._encryption.initiateSession();
 
-      console.log('[Tivra DebugMind] AWS connection response:', response.data);
+        if (!sessionEstablished) {
+          console.warn('[E2E] Failed to establish secure session, falling back to unencrypted');
+          this._encryptionEnabled = false;
+        } else {
+          console.log('✅ [E2E] Secure session established');
+          this.addMessage({
+            type: 'system',
+            content: `🔐 Secure connection established (E2E encrypted)`,
+            timestamp: new Date()
+          });
+        }
+      }
 
-      if (response.data.success) {
+      let response;
+
+      // Send encrypted request if encryption is enabled
+      if (this._encryptionEnabled && this._encryption && this._encryption.isSessionActive()) {
+        console.log('[E2E] Sending encrypted AWS credentials...');
+        response = await this._encryption.sendEncryptedRequest('/api/aws/connect', {
+          accessKeyId,
+          secretAccessKey,
+          region
+        }, 'POST');
+      } else {
+        // Fallback to unencrypted
+        console.log('[E2E] Sending unencrypted request (encryption disabled)');
+        response = await axios.post(`${this._apiUrl}/api/aws/connect`, {
+          accessKeyId,
+          secretAccessKey,
+          region
+        });
+        response = response.data;
+      }
+
+      console.log('[Tivra DebugMind] AWS connection response:', response);
+
+      if (response.success) {
+        // Store credentials securely in VS Code SecretStorage
+        await this._credentialManager.storeManualCredentials({
+          accessKeyId,
+          secretAccessKey,
+          region
+        });
+        console.log('[Tivra DebugMind] Credentials stored securely in SecretStorage');
+
         this.addMessage({
           type: 'ai',
-          content: `**AWS Connected** ✅\n\nRegion: ${region}\n\nFetching AWS services...`,
+          content: `**AWS Connected** ✅\n\nRegion: ${region}\n${this._encryptionEnabled ? '🔐 Using E2E encryption\n' : ''}🔒 Credentials stored securely\n\nFetching AWS services...`,
           timestamp: new Date()
         });
 
         // Fetch AWS services
         await this.fetchAWSServices(region);
       } else {
-        throw new Error(response.data.error || 'Connection failed');
+        throw new Error(response.error || 'Connection failed');
       }
     } catch (error: any) {
       console.error('[Tivra DebugMind] AWS connection error:', error);
@@ -223,6 +324,323 @@ export class DebugCopilot {
           'Connect me to AWS',
           'How do I get AWS credentials?'
         ]
+      });
+    }
+  }
+
+  /**
+   * Disconnect from AWS and clear all credentials
+   */
+  private async disconnectFromAWS() {
+    console.log('[Tivra DebugMind] Disconnecting from AWS...');
+
+    this.addMessage({
+      type: 'system',
+      content: `🔄 Disconnecting from AWS...`,
+      timestamp: new Date()
+    });
+
+    try {
+      // Clear credentials from VS Code SecretStorage
+      await this._credentialManager.clearCredentials();
+      console.log('[Tivra DebugMind] Credentials cleared from SecretStorage');
+
+      // Call server disconnect endpoint
+      await axios.post(`${this._apiUrl}/api/aws/disconnect`);
+      console.log('[Tivra DebugMind] Server disconnected');
+
+      // Clear local state
+      this._awsServices = [];
+      this._awsConnectionState = null;
+
+      this.addMessage({
+        type: 'ai',
+        content: `✅ **Disconnected from AWS**\n\nAll credentials have been cleared securely.\n\n**Connect to AWS** 🔗\n\nI'll help you connect using your AWS Access Keys.`,
+        timestamp: new Date(),
+        suggestedPrompts: [
+          'Use Access Keys'
+          // 'Use SSO' // TODO: SSO flow - fix later
+        ]
+      });
+    } catch (error: any) {
+      console.error('[Tivra DebugMind] Disconnect error:', error);
+      this.addMessage({
+        type: 'ai',
+        content: `⚠️ **Disconnect Warning**\n\nThere was an issue disconnecting: ${error.message}\n\nCredentials have been cleared locally. You can try connecting again.`,
+        timestamp: new Date(),
+        suggestedPrompts: [
+          'Use Access Keys'
+          // 'Use SSO' // TODO: SSO flow - fix later
+        ]
+      });
+    }
+  }
+
+  /**
+   * Start manual AWS keys flow
+   */
+  private startManualKeysFlow() {
+    this.addMessage({
+      type: 'ai',
+      content: `**AWS Access Keys Authentication** 🔑\n\n**How to get your AWS credentials:**\n\n1. Go to [AWS IAM Console](https://console.aws.amazon.com/iam/)\n2. Click "Users" → Select your user\n3. Go to "Security credentials" tab\n4. Click "Create access key"\n5. Copy the Access Key ID and Secret Access Key\n\n**Step 1 of 3: AWS Access Key ID**\n\n*Type your Access Key ID below:*`,
+      timestamp: new Date()
+    });
+
+    // Set state to wait for access key
+    this._awsConnectionState = { step: 'ACCESS_KEY' };
+  }
+
+  /**
+   * Start AWS SSO authentication flow
+   */
+  private async startSSOFlow() {
+    console.log('[SSO] Starting SSO authentication flow...');
+
+    // Show help message first
+    this.addMessage({
+      type: 'ai',
+      content: `**AWS SSO Authentication** 🔐\n\n**How to find your SSO Start URL:**\n\n1. Go to your organization's AWS SSO portal\n2. The URL looks like: \`https://my-company.awsapps.com/start\`\n3. Or ask your AWS administrator for the SSO portal URL\n\n**Benefits of SSO:**\n• No long-term credentials to manage\n• Automatic token refresh\n• Enterprise-grade security\n• Multi-account support\n\nI'll now ask you for your SSO Start URL...`,
+      timestamp: new Date()
+    });
+
+    try {
+      // Prompt user for SSO Start URL
+      console.log('[SSO] Showing input box for SSO Start URL...');
+      const ssoStartUrl = await vscode.window.showInputBox({
+        prompt: 'Enter your AWS SSO Start URL',
+        placeHolder: 'https://my-company.awsapps.com/start',
+        ignoreFocusOut: true,
+        validateInput: (value) => {
+          if (!value) return 'SSO Start URL is required';
+          if (!value.startsWith('https://')) return 'URL must start with https://';
+          if (!value.includes('awsapps.com')) return 'Must be a valid AWS SSO portal URL';
+          return null;
+        }
+      });
+
+      console.log('[SSO] Input box returned, value:', ssoStartUrl ? 'provided' : 'null/cancelled');
+
+      if (!ssoStartUrl) {
+        console.log('[SSO] User cancelled SSO URL input');
+        this._awsConnectionState = null;
+        this.addMessage({
+          type: 'ai',
+          content: `AWS SSO authentication cancelled.\n\nWould you like to try again?`,
+          timestamp: new Date(),
+          suggestedPrompts: ['Use Access Keys'] // 'Use SSO' - TODO: fix later
+        });
+        return;
+      }
+
+      console.log('[SSO] SSO URL provided:', ssoStartUrl);
+
+      // Prompt for region
+      const ssoRegion = await vscode.window.showQuickPick(
+        ['us-east-1', 'us-west-2', 'eu-west-1', 'ap-south-1', 'eu-central-1'],
+        {
+          placeHolder: 'Select your AWS SSO Region',
+          ignoreFocusOut: true
+        }
+      );
+
+      if (!ssoRegion) {
+        console.log('[SSO] User cancelled region selection');
+        this._awsConnectionState = null;
+        this.addMessage({
+          type: 'ai',
+          content: `AWS SSO authentication cancelled.\n\nWould you like to try again?`,
+          timestamp: new Date(),
+          suggestedPrompts: ['Use Access Keys'] // 'Use SSO' - TODO: fix later
+        });
+        return;
+      }
+
+      console.log('[SSO] Region selected:', ssoRegion);
+      console.log('[SSO] API URL:', this._apiUrl);
+
+      this.addMessage({
+        type: 'system',
+        content: `🔐 Initiating AWS SSO authentication...\n\nSSO Portal: ${ssoStartUrl}\nRegion: ${ssoRegion}`,
+        timestamp: new Date()
+      });
+
+      // Step 1: Initialize SSO OAuth flow
+      console.log('[SSO] Calling POST', `${this._apiUrl}/api/aws/oauth/init`);
+      const initResponse = await axios.post(`${this._apiUrl}/api/aws/oauth/init`, {
+        ssoStartUrl,
+        ssoRegion
+      });
+
+      console.log('[SSO] Init response status:', initResponse.status);
+      console.log('[SSO] Init response data:', JSON.stringify(initResponse.data, null, 2));
+
+      if (!initResponse.data.ok) {
+        console.error('[SSO] Init failed:', initResponse.data.error);
+        throw new Error(initResponse.data.error || 'Failed to initialize SSO');
+      }
+
+      const { sessionId, userCode, verificationUriComplete, verificationUri, interval, expiresIn } = initResponse.data;
+
+      // Show device code to user and open browser
+      const verifyUrl = verificationUriComplete || verificationUri;
+
+      this.addMessage({
+        type: 'ai',
+        content: `**📱 Device Authorization Required**\n\n1. I'll open your browser to: ${verifyUrl}\n\n2. Enter this code: **${userCode}**\n\n3. Approve the request in your browser\n\n4. I'll automatically detect when you're authenticated\n\n*Opening browser now...*`,
+        timestamp: new Date()
+      });
+
+      // Open browser for user to authenticate
+      await vscode.env.openExternal(vscode.Uri.parse(verifyUrl));
+
+      // Start polling for authorization
+      await this.pollForSSOAuthorization(sessionId, interval || 5, expiresIn);
+
+    } catch (error: any) {
+      console.error('[Tivra DebugMind] SSO flow error:', error);
+      this._awsConnectionState = null;
+      this.addMessage({
+        type: 'ai',
+        content: `❌ **SSO Authentication Failed**\n\nError: ${error.response?.data?.error || error.message}\n\nWould you like to try again?`,
+        timestamp: new Date(),
+        suggestedPrompts: ['Use AWS SSO', 'Use Manual Keys']
+      });
+    }
+  }
+
+  /**
+   * Poll for SSO authorization completion
+   */
+  private async pollForSSOAuthorization(sessionId: string, interval: number, expiresIn: number) {
+    const maxAttempts = Math.floor(expiresIn / interval);
+    let attempts = 0;
+
+    const pollInterval = setInterval(async () => {
+      attempts++;
+
+      try {
+        const pollResponse = await axios.post(`${this._apiUrl}/api/aws/oauth/poll`, {
+          sessionId
+        });
+
+        if (pollResponse.data.authorized) {
+          clearInterval(pollInterval);
+
+          const { accounts, accessToken, expiresIn } = pollResponse.data;
+
+          this.addMessage({
+            type: 'ai',
+            content: `✅ **AWS SSO Authentication Successful!**\n\nFound ${accounts.length} AWS account(s):\n${accounts.map((acc: any) => `• ${acc.accountName} (${acc.accountId})`).join('\n')}\n\nSelect an account to continue:`,
+            timestamp: new Date()
+          });
+
+          // Let user select account
+          await this.selectSSOAccount(sessionId, accounts, accessToken, expiresIn);
+        } else if (pollResponse.data.expired) {
+          clearInterval(pollInterval);
+          this._awsConnectionState = null;
+          this.addMessage({
+            type: 'ai',
+            content: `⏰ **Authorization Expired**\n\nThe device code has expired. Please try again.`,
+            timestamp: new Date(),
+            suggestedPrompts: ['Use Access Keys'] // 'Use SSO' - TODO: fix later
+          });
+        }
+
+      } catch (error: any) {
+        if (attempts >= maxAttempts) {
+          clearInterval(pollInterval);
+          this._awsConnectionState = null;
+          this.addMessage({
+            type: 'ai',
+            content: `⏰ **Authorization Timeout**\n\nDidn't receive authorization in time. Please try again.`,
+            timestamp: new Date(),
+            suggestedPrompts: ['Use Access Keys'] // 'Use SSO' - TODO: fix later
+          });
+        }
+      }
+    }, interval * 1000);
+  }
+
+  /**
+   * Let user select AWS account and role for SSO
+   */
+  private async selectSSOAccount(sessionId: string, accounts: any[], accessToken: string, expiresIn: number) {
+    try {
+      // Show account picker
+      const selectedAccount = await vscode.window.showQuickPick(
+        accounts.map((acc: any) => ({
+          label: acc.accountName || acc.accountId,
+          description: acc.accountId,
+          detail: acc.emailAddress,
+          account: acc
+        })),
+        {
+          placeHolder: 'Select AWS Account',
+          ignoreFocusOut: true
+        }
+      );
+
+      if (!selectedAccount) {
+        this._awsConnectionState = null;
+        this.addMessage({
+          type: 'ai',
+          content: `Account selection cancelled.`,
+          timestamp: new Date(),
+          suggestedPrompts: ['Use Access Keys'] // 'Use SSO' - TODO: fix later
+        });
+        return;
+      }
+
+      this.addMessage({
+        type: 'system',
+        content: `🔄 Getting credentials for ${selectedAccount.label}...`,
+        timestamp: new Date()
+      });
+
+      // Get role credentials
+      const credsResponse = await axios.post(`${this._apiUrl}/api/aws/oauth/credentials`, {
+        sessionId,
+        accountId: selectedAccount.account.accountId
+      });
+
+      if (!credsResponse.data.ok) {
+        throw new Error(credsResponse.data.error || 'Failed to get credentials');
+      }
+
+      const { credentials, account } = credsResponse.data;
+
+      // Store SSO credentials in SecretStorage
+      const expiresAt = Date.now() + (expiresIn * 1000);
+      await this._credentialManager.storeSSOCredentials({
+        accessToken,
+        accountId: account.id,
+        roleName: account.roleName,
+        region: 'us-east-1', // TODO: get from user or SSO config
+        expiresAt
+      });
+
+      console.log('[Tivra DebugMind] SSO credentials stored securely');
+
+      this._awsConnectionState = null;
+
+      this.addMessage({
+        type: 'ai',
+        content: `**AWS SSO Connected** ✅\n\nAccount: ${account.name}\nRole: ${account.roleName}\n🔒 SSO credentials stored securely\n\nFetching AWS services...`,
+        timestamp: new Date()
+      });
+
+      // Fetch AWS services
+      await this.fetchAWSServices('us-east-1'); // TODO: use actual region
+
+    } catch (error: any) {
+      console.error('[Tivra DebugMind] Account selection error:', error);
+      this._awsConnectionState = null;
+      this.addMessage({
+        type: 'ai',
+        content: `❌ **Failed to get credentials**\n\nError: ${error.response?.data?.error || error.message}`,
+        timestamp: new Date(),
+        suggestedPrompts: ['Use AWS SSO', 'Use Manual Keys']
       });
     }
   }
@@ -248,17 +666,12 @@ export class DebugCopilot {
 
         this.addMessage({
           type: 'ai',
-          content: `**AWS Services Found** ✅\n\n${servicesList}\n\nLive monitoring enabled. Watching for errors...`,
-          timestamp: new Date(),
-          suggestedPrompts: [
-            'Analyze errors in my services',
-            'Show me recent errors',
-            'Monitor for new errors'
-          ]
+          content: `**AWS Services Found** ✅\n\n${servicesList}\n\nAnalyzing services for errors...`,
+          timestamp: new Date()
         });
 
-        // Start automatic monitoring for demo
-        setTimeout(() => this.startAutomaticMonitoring(), 2000);
+        // Automatically analyze services after discovery
+        await this.analyzeAllServices();
       } else {
         // No services found
         this.addMessage({
@@ -282,49 +695,178 @@ export class DebugCopilot {
   }
 
   /**
-   * Start automatic monitoring for demo
+   * Analyze a service with a specific log group
    */
-  private async startAutomaticMonitoring() {
-    this._isMonitoring = true;
+  private async analyzeServiceWithLogGroup(serviceName: string, serviceType: string, logGroupName: string) {
+    console.log(`[Tivra DebugMind] Analyzing service with provided log group:`);
+    console.log(`  Service: ${serviceName}`);
+    console.log(`  Type: ${serviceType}`);
+    console.log(`  Log Group: ${logGroupName}`);
+    console.log(`  API URL: ${this._apiUrl}/api/aws/logs`);
 
-    // Poll every 10 seconds for demo
-    this._monitoringInterval = setInterval(async () => {
-      await this.checkForErrors();
-    }, 10000);
-
-    this.addMessage({
-      type: 'system',
-      content: '🔄 Monitoring AWS services...',
-      timestamp: new Date()
-    });
-  }
-
-  /**
-   * Check for errors in AWS services
-   */
-  private async checkForErrors() {
     try {
-      // For demo, use a test service or the connected service
-      const response = await axios.post(`${this._apiUrl}/api/aws/logs/analyze`, {
-        serviceName: 'test-service',
-        serviceType: 'Lambda',
-        timeRange: {
-          start: Date.now() - 60000, // Last 1 minute
-          end: Date.now()
+      console.log('[Tivra DebugMind] Sending API request...');
+      const response = await axios.get(`${this._apiUrl}/api/aws/logs`, {
+        params: {
+          serviceName: serviceName,
+          serviceType: serviceType,
+          logGroupName: logGroupName
         }
       });
 
-      if (response.data.totalErrors > 0) {
-        // Error detected!
-        await this.handleDetectedError(response.data);
+      console.log('[Tivra DebugMind] API Response received:');
+      console.log(`  Status: ${response.status}`);
+      console.log(`  Error Count: ${response.data.errorCount}`);
+      console.log(`  Top Errors: ${response.data.topErrors?.length || 0}`);
+      console.log(`  Message: ${response.data.message || 'N/A'}`);
 
-        // Stop monitoring after first error (for demo)
-        this.stopMonitoring();
+      if (response.data.errorCount > 0) {
+        // Show errors found
+        let errorMessage = `**⚠️ Errors Found in ${serviceName}**\n\n`;
+        errorMessage += `Found ${response.data.errorCount} error(s) in the last hour.\n\n`;
+
+        // Show top errors
+        if (response.data.topErrors && response.data.topErrors.length > 0) {
+          errorMessage += `**Top Errors:**\n\n`;
+          response.data.topErrors.slice(0, 3).forEach((err: any, i: number) => {
+            errorMessage += `${i + 1}. **${err.message}** (${err.count} occurrences)\n`;
+          });
+        }
+
+        errorMessage += `\n**Generating Root Cause Analysis...**`;
+
+        this.addMessage({
+          type: 'ai',
+          content: errorMessage,
+          timestamp: new Date()
+        });
+
+        // Call Claude for RCA
+        const rcaResponse = await axios.post(`${this._apiUrl}/api/chat`, {
+          message: `Analyze these errors and provide root cause analysis with fixes:\n\nService: ${serviceName}\nType: ${serviceType}\nErrors: ${JSON.stringify(response.data.topErrors.slice(0, 3), null, 2)}`,
+          context: {
+            recentErrors: response.data.topErrors,
+            connectedServices: this._awsServices.map(s => s.name),
+            conversationHistory: []
+          }
+        });
+
+        const { response: rcaText, suggestedFix } = rcaResponse.data;
+
+        this.addMessage({
+          type: 'ai',
+          content: `## 🔍 Root Cause Analysis\n\n${rcaText}`,
+          timestamp: new Date(),
+          suggestedFix: suggestedFix,
+          suggestedPrompts: [
+            'Create a PR with the fix',
+            'Show more error details',
+            'Analyze other services'
+          ]
+        });
+      } else {
+        this.addMessage({
+          type: 'ai',
+          content: `✅ **No Errors Found**\n\nNo errors detected in **${serviceName}** logs from \`${logGroupName}\` in the last hour.`,
+          timestamp: new Date()
+        });
       }
-    } catch (error) {
-      console.error('Monitoring error:', error);
+    } catch (error: any) {
+      console.error('[Tivra DebugMind] Error analyzing service with log group:', error);
+      console.error(`  Service: ${serviceName}`);
+      console.error(`  Log Group: ${logGroupName}`);
+      console.error(`  Error Message: ${error.message}`);
+      console.error(`  Response Status: ${error.response?.status}`);
+      console.error(`  Response Data:`, error.response?.data);
+
+      this.addMessage({
+        type: 'ai',
+        content: `❌ **Analysis Failed**\n\nCould not analyze logs: ${error.response?.data?.message || error.message}\n\nPlease verify:\n• Log group name is correct\n• You have CloudWatch Logs permissions\n• The log group exists in your AWS account`,
+        timestamp: new Date()
+      });
     }
   }
+
+  /**
+   * Prompt user to provide log group name for a service
+   */
+  private async promptForLogGroup(serviceName: string) {
+    this.addMessage({
+      type: 'ai',
+      content: `**Provide Log Group for ${serviceName}**\n\nPlease enter the CloudWatch Logs group name for this EC2 instance.\n\nExample log group names:\n• \`/aws/ec2/instance/${serviceName}\`\n• \`/var/log/application\`\n• Custom log group you configured\n\nYou can find log groups in the AWS Console under CloudWatch > Log groups.`,
+      timestamp: new Date()
+    });
+
+    // Set state to wait for log group input
+    this._awsConnectionState = {
+      step: 'EC2_LOG_GROUP' as any,
+      serviceName: serviceName
+    } as any;
+  }
+
+  /**
+   * Show CloudWatch agent setup instructions
+   */
+  private async showCloudWatchAgentInstructions() {
+    const instructions = `**📖 How to Setup CloudWatch Agent for EC2**\n\n` +
+      `To enable CloudWatch Logs for EC2 instances, you need to install and configure the CloudWatch agent:\n\n` +
+      `**Step 1: Install CloudWatch Agent**\n` +
+      `\`\`\`bash\n` +
+      `# Download the agent (Amazon Linux 2)\n` +
+      `wget https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm\n` +
+      `sudo rpm -U ./amazon-cloudwatch-agent.rpm\n` +
+      `\`\`\`\n\n` +
+      `**Step 2: Create Configuration File**\n` +
+      `Create \`/opt/aws/amazon-cloudwatch-agent/etc/config.json\`:\n` +
+      `\`\`\`json\n` +
+      `{\n` +
+      `  "logs": {\n` +
+      `    "logs_collected": {\n` +
+      `      "files": {\n` +
+      `        "collect_list": [\n` +
+      `          {\n` +
+      `            "file_path": "/var/log/application.log",\n` +
+      `            "log_group_name": "/aws/ec2/your-instance-name",\n` +
+      `            "log_stream_name": "{instance_id}"\n` +
+      `          }\n` +
+      `        ]\n` +
+      `      }\n` +
+      `    }\n` +
+      `  }\n` +
+      `}\n` +
+      `\`\`\`\n\n` +
+      `**Step 3: Start the Agent**\n` +
+      `\`\`\`bash\n` +
+      `sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \\\n` +
+      `  -a fetch-config \\\n` +
+      `  -m ec2 \\\n` +
+      `  -s \\\n` +
+      `  -c file:/opt/aws/amazon-cloudwatch-agent/etc/config.json\n` +
+      `\`\`\`\n\n` +
+      `**Step 4: Verify Logs in AWS Console**\n` +
+      `• Go to CloudWatch Console\n` +
+      `• Navigate to Log groups\n` +
+      `• Look for your log group: \`/aws/ec2/your-instance-name\`\n\n` +
+      `**IAM Permissions Required:**\n` +
+      `Your EC2 instance needs an IAM role with these permissions:\n` +
+      `• \`logs:CreateLogGroup\`\n` +
+      `• \`logs:CreateLogStream\`\n` +
+      `• \`logs:PutLogEvents\`\n\n` +
+      `📚 **Full Documentation:** https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Install-CloudWatch-Agent.html`;
+
+    this.addMessage({
+      type: 'ai',
+      content: instructions,
+      timestamp: new Date(),
+      suggestedPrompts: [
+        'I\'ve installed the agent, analyze again',
+        'Skip EC2 log analysis',
+        'Provide log group manually'
+      ]
+    });
+  }
+
+
 
   /**
    * Analyze all services for errors
@@ -357,24 +899,31 @@ export class DebugCopilot {
       let errorsByService: any[] = [];
 
       // Analyze each service for errors
+      const servicesNeedingLogGroup: any[] = [];
+
       for (const service of this._awsServices) {
         try {
-          const response = await axios.post(`${this._apiUrl}/api/aws/logs/analyze`, {
-            serviceName: service.name,
-            serviceType: service.type,
-            timeRange: {
-              start: Date.now() - 3600000, // Last 1 hour
-              end: Date.now()
+          const response = await axios.get(`${this._apiUrl}/api/aws/logs`, {
+            params: {
+              serviceName: service.name,
+              serviceType: service.type
             }
           });
 
-          if (response.data.totalErrors > 0) {
-            totalErrors += response.data.totalErrors;
+          if (response.data.errorCount > 0) {
+            totalErrors += response.data.errorCount;
             errorsByService.push({
               service: service.name,
               type: service.type,
-              errors: response.data.errors,
-              count: response.data.totalErrors
+              errors: response.data.topErrors || [],
+              count: response.data.errorCount
+            });
+          } else if (response.data.needsLogGroup) {
+            // Service needs manual log group configuration
+            servicesNeedingLogGroup.push({
+              service: service.name,
+              type: service.type,
+              message: response.data.message
             });
           }
         } catch (error) {
@@ -382,8 +931,37 @@ export class DebugCopilot {
         }
       }
 
+      // Show info about services that need log group configuration
+      if (servicesNeedingLogGroup.length > 0) {
+        let configMessage = `**ℹ️ Configuration Needed**\n\n`;
+        configMessage += `The following services could not be analyzed automatically:\n\n`;
+
+        servicesNeedingLogGroup.forEach(svc => {
+          configMessage += `**${svc.service}** (${svc.type})\n`;
+          configMessage += `${svc.message}\n\n`;
+        });
+
+        configMessage += `**What would you like to do?**`;
+
+        this.addMessage({
+          type: 'ai',
+          content: configMessage,
+          timestamp: new Date(),
+          suggestedPrompts: servicesNeedingLogGroup.map(svc =>
+            `Provide log group for ${svc.service}`
+          ).concat([
+            'Skip EC2 log analysis',
+            'How to setup CloudWatch agent for EC2'
+          ])
+        });
+
+        // Store services needing configuration for later reference
+        this._servicesNeedingLogGroup = servicesNeedingLogGroup;
+      }
+
       // Display results
-      if (totalErrors === 0) {
+      if (totalErrors === 0 && servicesNeedingLogGroup.length === 0) {
+        // No errors and all services analyzed successfully
         this.addMessage({
           type: 'ai',
           content: `**No Errors Found!** ✅\n\nAll your services are running smoothly with no errors in the last hour.\n\n**Services Analyzed:**\n${this._awsServices.map(s => `• ${s.name} (${s.type})`).join('\n')}\n\nEverything looks perfect! 🎉`,
@@ -394,6 +972,19 @@ export class DebugCopilot {
             'Show service status'
           ]
         });
+      } else if (totalErrors === 0 && servicesNeedingLogGroup.length > 0) {
+        // No errors in services that were analyzed, but some need config
+        const analyzedServices = this._awsServices.filter(s =>
+          !servicesNeedingLogGroup.some(needsConfig => needsConfig.service === s.name)
+        );
+
+        if (analyzedServices.length > 0) {
+          this.addMessage({
+            type: 'ai',
+            content: `**No Errors Found!** ✅\n\nThe following services are running smoothly with no errors:\n\n${analyzedServices.map(s => `• ${s.name} (${s.type})`).join('\n')}\n\nNote: Some services need additional configuration to be analyzed.`,
+            timestamp: new Date()
+          });
+        }
       } else {
         // Build error summary
         let errorMessage = `**Errors Found** ⚠️\n\nFound ${totalErrors} error(s) across ${errorsByService.length} service(s) in the last hour.\n\n`;
@@ -459,42 +1050,6 @@ export class DebugCopilot {
     }
   }
 
-  /**
-   * Handle detected error and generate fix
-   */
-  private async handleDetectedError(errorData: any) {
-    this.addMessage({
-      type: 'ai',
-      content: `🚨 **Error Detected!**\n\nService: ${errorData.serviceName}\n\nErrors: ${errorData.totalErrors}\n\nAnalyzing and generating fix...`,
-      timestamp: new Date()
-    });
-
-    // Ask Claude to generate a fix
-    try {
-      const fixResponse = await axios.post(`${this._apiUrl}/api/chat`, {
-        message: `Generate a fix for this error: ${JSON.stringify(errorData.errors[0])}`,
-        context: {
-          recentErrors: errorData.errors,
-          conversationHistory: []
-        }
-      });
-
-      const { response, suggestedFix } = fixResponse.data;
-
-      this.addMessage({
-        type: 'ai',
-        content: response,
-        timestamp: new Date(),
-        suggestedFix: suggestedFix
-      });
-    } catch (error: any) {
-      this.addMessage({
-        type: 'ai',
-        content: `Found the error but couldn't generate a fix. Error: ${error.message}`,
-        timestamp: new Date()
-      });
-    }
-  }
 
   /**
    * Stop monitoring
@@ -657,13 +1212,82 @@ export class DebugCopilot {
       if (handled) return;
     }
 
-    // Check if user is asking to connect to AWS
-    const connectKeywords = ['connect', 'aws', 'credentials', 'access key', 'set up', 'setup'];
     const lowerText = text.toLowerCase();
-    const isConnectRequest = connectKeywords.some(keyword => lowerText.includes(keyword)) &&
-                             (lowerText.includes('aws') || lowerText.includes('connect'));
 
-    if (isConnectRequest) {
+    // Check if user is providing log group for EC2
+    if (lowerText.includes('provide log group')) {
+      const match = text.match(/provide log group for (\S+)/i);
+      if (match && match[1]) {
+        const serviceName = match[1];
+        await this.promptForLogGroup(serviceName);
+        return;
+      }
+    }
+
+    // Check if user wants to skip EC2 analysis
+    if (lowerText.includes('skip') && (lowerText.includes('ec2') || lowerText.includes('log analysis'))) {
+      this.addMessage({
+        type: 'ai',
+        content: `✅ **Skipped EC2 Log Analysis**\n\nEC2 instances will be excluded from log analysis. You can still analyze other services.\n\nIf you change your mind, just ask me to "Analyze EC2 logs" and provide the log group name.`,
+        timestamp: new Date()
+      });
+      this._servicesNeedingLogGroup = []; // Clear the list
+      return;
+    }
+
+    // Check if user wants CloudWatch agent setup instructions
+    if (lowerText.includes('setup cloudwatch') || lowerText.includes('install cloudwatch') ||
+        (lowerText.includes('how to') && lowerText.includes('cloudwatch agent'))) {
+      await this.showCloudWatchAgentInstructions();
+      return;
+    }
+
+    // Check if user wants to start real-time monitoring
+    if ((lowerText.includes('start') || lowerText.includes('enable')) &&
+        (lowerText.includes('real-time') || lowerText.includes('realtime') ||
+         lowerText.includes('live') || lowerText.includes('continuous') ||
+         lowerText.includes('monitor'))) {
+      if (this._awsServices.length > 0) {
+        await this.startRealtimeMonitoring(this._awsServices);
+        return;
+      } else {
+        this.addMessage({
+          type: 'ai',
+          content: `⚠️ **No Services Discovered**\n\nPlease discover your AWS services first by asking me to "analyze my AWS services" or "connect to AWS".`,
+          timestamp: new Date()
+        });
+        return;
+      }
+    }
+
+    // Check if user wants to stop real-time monitoring
+    if ((lowerText.includes('stop') || lowerText.includes('disable')) &&
+        (lowerText.includes('monitor') || lowerText.includes('real-time') ||
+         lowerText.includes('realtime') || lowerText.includes('live'))) {
+      await this.stopRealtimeMonitoring();
+      this.addMessage({
+        type: 'ai',
+        content: `✅ **Real-time monitoring stopped**\n\nYou can restart monitoring anytime by asking me to "start real-time monitoring".`,
+        timestamp: new Date()
+      });
+      return;
+    }
+
+    // Check if user wants to disconnect from AWS
+    if ((lowerText.includes('disconnect') || lowerText.includes('logout') || lowerText.includes('reset')) &&
+        lowerText.includes('aws')) {
+      await this.disconnectFromAWS();
+      return;
+    }
+
+    // Check if user is choosing authentication method
+    const usesAccessKeys = lowerText.includes('access key') ||
+                          (lowerText.includes('use') && lowerText.includes('key'));
+    // TODO: SSO flow - fix later
+    // const usesSSO = lowerText.includes('sso') ||
+    //                (lowerText.includes('use') && lowerText.includes('sso'));
+
+    if (usesAccessKeys) {
       // Check if already connected
       try {
         const statusResponse = await axios.get(`${this._apiUrl}/api/aws/status`);
@@ -684,10 +1308,37 @@ export class DebugCopilot {
         // Continue with connection flow
       }
 
-      // Start AWS connection flow
-      this.startAWSConnectionFlow();
+      // Start manual keys flow directly
+      this.startManualKeysFlow();
       return;
     }
+
+    // TODO: SSO flow - fix later
+    // if (usesSSO) {
+    //   // Check if already connected
+    //   try {
+    //     const statusResponse = await axios.get(`${this._apiUrl}/api/aws/status`);
+    //     if (statusResponse.data?.connected) {
+    //       this.addMessage({
+    //         type: 'ai',
+    //         content: `✅ You're already connected to AWS!\n\nYour AWS credentials are configured and ready to use.\n\n**What would you like to do?**\n\n• Analyze errors in a service\n• Check CloudWatch logs\n• Debug a specific issue\n\nJust ask me and I'll help!`,
+    //         timestamp: new Date(),
+    //         suggestedPrompts: [
+    //           'Show me recent errors in my services',
+    //           'Analyze Lambda function failures',
+    //           'Help me debug a timeout issue'
+    //         ]
+    //       });
+    //       return;
+    //     }
+    //   } catch (error) {
+    //     // Continue with connection flow
+    //   }
+
+    //   // Start SSO flow directly
+    //   await this.startSSOFlow();
+    //   return;
+    // }
 
     // Before processing any other prompt, verify AWS connection
     try {
@@ -695,10 +1346,12 @@ export class DebugCopilot {
       if (!statusResponse.data?.connected) {
         this.addMessage({
           type: 'ai',
-          content: `⚠️ **AWS Not Connected**\n\nTo analyze logs and debug AWS services, I need to connect to your AWS account first.\n\nPlease click below to get started:`,
+          content: `⚠️ **AWS Not Connected**\n\nTo analyze logs and debug AWS services, I need to connect to your AWS account first.\n\n**Connect to AWS** 🔗\n\nChoose your authentication method:`,
           timestamp: new Date(),
           suggestedPrompts: [
-            'Connect me to AWS'
+            'Use Access Keys',
+            // 'Use SSO' // TODO: fix later
+            'Use Access Keys'
           ]
         });
         return;
@@ -706,10 +1359,11 @@ export class DebugCopilot {
     } catch (error) {
       this.addMessage({
         type: 'ai',
-        content: `⚠️ **Unable to verify AWS connection**\n\nI couldn't check your AWS connection status. Please make sure:\n\n1. Backend server is running\n2. You're connected to the internet\n\nThen try connecting to AWS:`,
+        content: `⚠️ **Unable to verify AWS connection**\n\nI couldn't check your AWS connection status. Please make sure:\n\n1. Backend server is running\n2. You're connected to the internet\n\n**Connect to AWS** 🔗\n\nChoose your authentication method:`,
         timestamp: new Date(),
         suggestedPrompts: [
-          'Connect me to AWS'
+          'Use Access Keys',
+          'Use SSO'
         ]
       });
       return;
@@ -740,7 +1394,10 @@ export class DebugCopilot {
         message: text,
         context: {
           ...this._conversationContext,
-          connectedServices: this._conversationContext.service ? [this._conversationContext.service.name] : []
+          connectedServices: this._conversationContext.service ? [this._conversationContext.service.name] : [],
+          // Include error analysis data if available
+          errorAnalysis: this._errorAnalysisData,
+          awsServices: this._awsServices
         }
       });
 
@@ -847,6 +1504,8 @@ export class DebugCopilot {
           // Track applied fix
           this._conversationContext.appliedFixes.push({
             filePath: fix.filePath,
+            code: fix.newCode,
+            description: fix.explanation || 'Code fix applied',
             timestamp: new Date()
           });
 
@@ -1259,8 +1918,161 @@ export class DebugCopilot {
 </html>`;
   }
 
-  public dispose() {
+  // ========================================
+  // Real-time Monitoring Methods
+  // ========================================
+
+  /**
+   * Start real-time monitoring using polling (every 10 seconds)
+   */
+  private async startRealtimeMonitoring(services: any[]) {
+    if (!services || services.length === 0) {
+      console.log('[Tivra DebugMind] No services to monitor');
+      return;
+    }
+
+    console.log(`[Tivra DebugMind] Starting real-time monitoring for ${services.length} service(s)`);
+
+    // Start polling monitoring
+    this.startPollingMonitoring(services);
+  }
+
+  /**
+   * Start polling monitoring (every 10 seconds)
+   */
+  private startPollingMonitoring(services: any[]) {
+    console.log('[Tivra DebugMind] Starting polling mode (10s interval)');
+
+    this.addMessage({
+      type: 'system',
+      content: `🔄 **Monitoring started** (polling mode) for ${services.length} service(s)\n\nChecking for errors every 10 seconds.`,
+      timestamp: new Date()
+    });
+
+    // Initialize last poll time for each service
+    services.forEach(service => {
+      this._lastPollTime.set(service.name, Date.now());
+    });
+
+    // Poll every 10 seconds
+    this._pollingInterval = setInterval(async () => {
+      for (const service of services) {
+        await this.pollServiceLogs(service);
+      }
+    }, 10000);
+  }
+
+  /**
+   * Poll logs for a single service
+   */
+  private async pollServiceLogs(service: any) {
+    try {
+      const since = this._lastPollTime.get(service.name) || Date.now() - 60000;
+
+      const response = await axios.get(`${this._apiUrl}/api/aws/logs/poll`, {
+        params: {
+          serviceName: service.name,
+          serviceType: service.type,
+          logGroupName: service.logGroup,
+          since: since
+        }
+      });
+
+      // Update last poll time
+      this._lastPollTime.set(service.name, response.data.lastCheck);
+
+      // Handle new errors
+      if (response.data.errorCount > 0) {
+        this.handleLogUpdate(service.name, response.data);
+      }
+
+    } catch (err: any) {
+      console.error(`[Tivra DebugMind] Error polling ${service.name}:`, err);
+    }
+  }
+
+  /**
+   * Handle log update (from WebSocket or polling)
+   */
+  private handleLogUpdate(serviceName: string, data: any) {
+    console.log(`[Tivra DebugMind] Log update for ${serviceName}:`, data);
+
+    if (data.errorCount > 0) {
+      this.addMessage({
+        type: 'ai',
+        content: `📊 **New Errors Detected in ${serviceName}**\n\n` +
+                `Found ${data.errorCount} new error(s):\n\n` +
+                data.topErrors.slice(0, 3).map((err: any, i: number) =>
+                  `${i + 1}. **${err.message}** (${err.count} occurrences)`
+                ).join('\n'),
+        timestamp: new Date(),
+        suggestedPrompts: [
+          `Analyze errors in ${serviceName}`,
+          'Show detailed root cause analysis',
+          'Suggest a fix'
+        ]
+      });
+    }
+  }
+
+  /**
+   * Handle error alert (critical errors)
+   */
+  private handleErrorAlert(serviceName: string, data: any) {
+    console.log(`[Tivra DebugMind] Error alert for ${serviceName}:`, data);
+
+    this.addMessage({
+      type: 'ai',
+      content: `🚨 **Critical Alert: ${serviceName}**\n\n` +
+              `${data.message}\n\n` +
+              `**Top Errors:**\n` +
+              data.topErrors.slice(0, 3).map((err: any, i: number) =>
+                `${i + 1}. ${err.message} (${err.count} occurrences)`
+              ).join('\n'),
+      timestamp: new Date(),
+      suggestedPrompts: [
+        'Perform immediate root cause analysis',
+        'What can I do right now to fix this?',
+        'Show me the error details'
+      ]
+    });
+
+    // Show VS Code notification
+    vscode.window.showErrorMessage(
+      `Tivra DebugMind: Critical errors detected in ${serviceName} (${data.errorCount} errors)`,
+      'View Details'
+    ).then(selection => {
+      if (selection === 'View Details') {
+        this._panel.reveal();
+      }
+    });
+  }
+
+  /**
+   * Stop real-time monitoring
+   */
+  private async stopRealtimeMonitoring() {
+    console.log('[Tivra DebugMind] Stopping real-time monitoring');
+
+    // Stop polling
+    if (this._pollingInterval) {
+      clearInterval(this._pollingInterval);
+      this._pollingInterval = null;
+    }
+
+    this._lastPollTime.clear();
+  }
+
+  public async dispose() {
     this.stopMonitoring();
+    await this.stopRealtimeMonitoring();
+
+    // Destroy encryption session
+    if (this._encryption) {
+      await this._encryption.destroySession();
+      this._encryption = null;
+    }
+
     DebugCopilot.currentPanel = undefined;
     this._panel.dispose();
     while (this._disposables.length) {
@@ -1288,6 +2100,6 @@ interface CodeFix {
 interface ConversationContext {
   service: { name: string; type: string } | null;
   recentErrors: any[];
-  appliedFixes: Array<{ filePath: string; timestamp: Date }>;
+  appliedFixes: Array<{ filePath: string; code: string; description: string; timestamp?: Date }>;
   conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>;
 }

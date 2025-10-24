@@ -233,12 +233,83 @@ node index.js
 - Cloud account with log access (currently supports AWS)
 - API credentials for log fetching
 
-## Privacy & Security
+## 🔒 Security & Privacy
 
-- Credentials are stored securely in VS Code's Secret Storage
-- Logs are analyzed in real-time, not stored permanently
-- All fixes require your explicit review and approval
-- Full undo support via VS Code's built-in undo
+Your security and privacy are our top priorities. Tivra DebugMind is designed with enterprise-grade security practices.
+
+### 🛡️ Credential Security
+
+**OS-Level Encryption:**
+- **AWS credentials stored in VS Code Secret Storage** (OS-level encrypted storage)
+  - macOS: Keychain
+  - Windows: Windows Credential Manager
+  - Linux: Secret Service API (libsecret)
+- **No plaintext credentials** in workspace settings or configuration files
+- **Server-side encryption** for API credentials (AES-256-CBC)
+- **Access Keys authentication** with secure storage
+
+### 🔐 Data Privacy
+
+**Zero Data Persistence:**
+- **Logs analyzed in-memory only** - never written to disk
+- **No log storage** - all analysis happens in real-time
+- **Session-based processing** - data discarded after analysis
+- **No telemetry** or usage tracking
+
+### 🌐 Network Security
+
+**HTTPS-Only Communication:**
+- **Production API:** `https://copilot.tivra.ai` (TLS 1.3)
+- **All API calls encrypted in transit**
+- **Certificate validation** enforced
+
+### ✋ User Control
+
+**Explicit Approval Required:**
+- **All fixes require review and approval** before application
+- **Preview before apply** - see exactly what will change
+- **Full undo support** via VS Code's built-in undo
+- **Reject option** - decline fixes without consequence
+
+### 🔍 AWS Permissions Required
+
+Tivra DebugMind requires **read-only** AWS permissions:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:DescribeLogGroups",
+        "logs:FilterLogEvents",
+        "cloudwatch:GetMetricData",
+        "cloudwatch:ListMetrics",
+        "xray:GetServiceGraph",
+        "xray:GetTraceSummaries",
+        "xray:BatchGetTraces",
+        "lambda:ListFunctions",
+        "lambda:GetFunction",
+        "ecs:ListClusters",
+        "ecs:ListServices",
+        "ecs:DescribeServices",
+        "ec2:DescribeInstances",
+        "rds:DescribeDBInstances"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+**Note:** All permissions are **read-only**. Tivra DebugMind never modifies your AWS infrastructure.
+
+### 📞 Security Concerns?
+
+If you discover a security vulnerability, please report it responsibly:
+- **Email:** security@tivra.ai
+- **Response time:** Within 24 hours
 
 ## Supported Services (v1)
 
