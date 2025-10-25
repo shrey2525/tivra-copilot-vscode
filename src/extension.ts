@@ -4,14 +4,23 @@
 import * as vscode from 'vscode';
 import { DebugCopilot } from './panels/debugCopilot';
 import { CredentialManager } from './utils/credential-manager';
+import { AnalyticsTracker } from './analytics/analytics-tracker';
 
 let copilot: DebugCopilot | undefined;
 let statusBarItem: vscode.StatusBarItem;
 let apiUrl: string;
 let credentialManager: CredentialManager;
+let analytics: AnalyticsTracker | undefined;
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('🤖 Tivra DebugMind activated!');
+
+  // Initialize Analytics Tracker with GA4
+  analytics = new AnalyticsTracker(context);
+  context.subscriptions.push({
+    dispose: () => analytics?.dispose()
+  });
+  console.log('[Tivra DebugMind] Analytics initialized');
 
   // Initialize Credential Manager with VS Code SecretStorage
   credentialManager = new CredentialManager(context.secrets);
@@ -33,13 +42,16 @@ export async function activate(context: vscode.ExtensionContext) {
   // Command: Open Debug Copilot
   context.subscriptions.push(
     vscode.commands.registerCommand('tivra.openCopilot', async () => {
-      copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl, credentialManager);
+      analytics?.trackFunnelStep('copilot_opened');
+      analytics?.trackFeatureUsage('copilot', 'open');
+      copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl, credentialManager, analytics);
     })
   );
 
   // Command: Start Debugging (with service selection)
   context.subscriptions.push(
     vscode.commands.registerCommand('tivra.startDebugging', async () => {
+      analytics?.trackFeatureUsage('debugging', 'start');
       await startDebugging(context);
     })
   );
@@ -47,6 +59,8 @@ export async function activate(context: vscode.ExtensionContext) {
   // Command: Connect to AWS
   context.subscriptions.push(
     vscode.commands.registerCommand('tivra.connectAWS', async () => {
+      analytics?.trackFunnelStep('aws_connection_started');
+      analytics?.trackFeatureUsage('aws', 'connect_start');
       await connectToAWS();
     })
   );
@@ -54,6 +68,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // Show welcome message on first activation
   const hasShownWelcome = context.globalState.get('hasShownWelcome');
   if (!hasShownWelcome) {
+    analytics?.trackFunnelStep('welcome_shown');
     showWelcomeMessage(context);
     context.globalState.update('hasShownWelcome', true);
   }
@@ -62,7 +77,7 @@ export async function activate(context: vscode.ExtensionContext) {
 async function startDebugging(context: vscode.ExtensionContext) {
   // Open copilot if not already open
   if (!copilot) {
-    copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl, credentialManager);
+    copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl, credentialManager, analytics);
   }
 
   // Ask user to select service
@@ -144,7 +159,7 @@ function showWelcomeMessage(context: vscode.ExtensionContext) {
     if (choice === 'Connect to AWS') {
       vscode.commands.executeCommand('tivra.connectAWS');
     } else if (choice === 'Open Copilot') {
-      copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl, credentialManager);
+      copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl, credentialManager, analytics);
     }
   });
 }

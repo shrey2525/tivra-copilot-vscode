@@ -5,6 +5,7 @@ import * as vscode from 'vscode';
 import axios from 'axios';
 import { E2EEncryption } from '../utils/e2e-encryption';
 import { CredentialManager, AWSCredentials } from '../utils/credential-manager';
+import { AnalyticsTracker } from '../analytics/analytics-tracker';
 
 export class DebugCopilot {
   public static currentPanel: DebugCopilot | undefined;
@@ -38,10 +39,14 @@ export class DebugCopilot {
   // Credential Manager
   private _credentialManager: CredentialManager;
 
-  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, apiUrl: string, credentialManager: CredentialManager) {
+  // Analytics
+  private _analytics: AnalyticsTracker | undefined;
+
+  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, apiUrl: string, credentialManager: CredentialManager, analytics?: AnalyticsTracker) {
     this._panel = panel;
     this._apiUrl = apiUrl;
     this._credentialManager = credentialManager;
+    this._analytics = analytics;
 
     // Initialize E2E encryption
     this._encryption = new E2EEncryption(apiUrl);
@@ -153,11 +158,12 @@ export class DebugCopilot {
     }
   }
 
-  public static createOrShow(extensionUri: vscode.Uri, apiUrl: string, credentialManager: CredentialManager) {
+  public static createOrShow(extensionUri: vscode.Uri, apiUrl: string, credentialManager: CredentialManager, analytics?: AnalyticsTracker) {
     const column = vscode.ViewColumn.Two;
 
     if (DebugCopilot.currentPanel) {
       DebugCopilot.currentPanel._panel.reveal(column);
+      analytics?.trackFeatureUsage('copilot', 'reveal_existing');
       return DebugCopilot.currentPanel;
     }
 
@@ -172,7 +178,8 @@ export class DebugCopilot {
       }
     );
 
-    DebugCopilot.currentPanel = new DebugCopilot(panel, extensionUri, apiUrl, credentialManager);
+    DebugCopilot.currentPanel = new DebugCopilot(panel, extensionUri, apiUrl, credentialManager, analytics);
+    analytics?.trackFeatureUsage('copilot', 'create_new');
     return DebugCopilot.currentPanel;
   }
 
@@ -303,6 +310,13 @@ export class DebugCopilot {
         });
         console.log('[Tivra DebugMind] Credentials stored securely in SecretStorage');
 
+        // Track successful AWS connection
+        this._analytics?.trackFunnelStep('aws_connected', {
+          region,
+          encrypted: this._encryptionEnabled
+        });
+        this._analytics?.trackFeatureUsage('aws', 'connect_success', { region });
+
         this.addMessage({
           type: 'ai',
           content: `**AWS Connected** ✅\n\nRegion: ${region}\n${this._encryptionEnabled ? '🔐 Using E2E encryption\n' : ''}🔒 Credentials stored securely\n\nFetching AWS services...`,
@@ -316,6 +330,13 @@ export class DebugCopilot {
       }
     } catch (error: any) {
       console.error('[Tivra DebugMind] AWS connection error:', error);
+
+      // Track AWS connection failure
+      this._analytics?.trackError('aws_connection_failed', error.message);
+      this._analytics?.trackFeatureUsage('aws', 'connect_failed', {
+        error: error.message
+      });
+
       this.addMessage({
         type: 'ai',
         content: `❌ **Failed to connect to AWS**\n\nError: ${error.response?.data?.error || error.message}\n\nPlease check your credentials and try again.\n\nWould you like to:\n• Try connecting again\n• Get help with AWS credentials`,
@@ -735,6 +756,17 @@ export class DebugCopilot {
           timestamp: new Date().toISOString()
         };
 
+        // Track service selection and analysis start
+        this._analytics?.trackFunnelStep('first_service_selected', {
+          serviceName,
+          serviceType,
+          errorCount: response.data.errorCount
+        });
+        this._analytics?.trackFeatureUsage('service', 'analyze_start', {
+          serviceType,
+          errorCount: response.data.errorCount
+        });
+
         // Show errors found
         let errorMessage = `**⚠️ Errors Found in ${serviceName}**\n\n`;
         errorMessage += `Found ${response.data.errorCount} error(s) in the last hour.\n\n`;
@@ -771,6 +803,17 @@ export class DebugCopilot {
         });
 
         const { response: rcaText, suggestedFix } = rcaResponse.data;
+
+        // Track successful analysis completion
+        this._analytics?.trackFunnelStep('first_analysis_completed', {
+          serviceName,
+          serviceType,
+          hasFix: !!suggestedFix
+        });
+        this._analytics?.trackFeatureUsage('service', 'analyze_complete', {
+          serviceType,
+          hasFix: !!suggestedFix
+        });
 
         this.addMessage({
           type: 'ai',
