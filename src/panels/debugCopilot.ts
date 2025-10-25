@@ -721,6 +721,20 @@ export class DebugCopilot {
       console.log(`  Message: ${response.data.message || 'N/A'}`);
 
       if (response.data.errorCount > 0) {
+        // Store service context with log group for later use
+        this._conversationContext.service = {
+          name: serviceName,
+          type: serviceType,
+          logGroupName: logGroupName
+        };
+        this._conversationContext.recentErrors = response.data.topErrors;
+
+        // Store complete CloudWatch analysis for SRE agent
+        this._errorAnalysisData = {
+          logs: response.data,
+          timestamp: new Date().toISOString()
+        };
+
         // Show errors found
         let errorMessage = `**⚠️ Errors Found in ${serviceName}**\n\n`;
         errorMessage += `Found ${response.data.errorCount} error(s) in the last hour.\n\n`;
@@ -743,8 +757,13 @@ export class DebugCopilot {
 
         // Call Claude for RCA
         const rcaResponse = await axios.post(`${this._apiUrl}/api/chat`, {
-          message: `Analyze these errors and provide root cause analysis with fixes:\n\nService: ${serviceName}\nType: ${serviceType}\nErrors: ${JSON.stringify(response.data.topErrors.slice(0, 3), null, 2)}`,
+          message: `Analyze these errors and provide root cause analysis with fixes:\n\nService: ${serviceName}\nType: ${serviceType}\nLog Group: ${logGroupName}\nErrors: ${JSON.stringify(response.data.topErrors.slice(0, 3), null, 2)}`,
           context: {
+            service: {
+              name: serviceName,
+              type: serviceType,
+              logGroupName: logGroupName
+            },
             recentErrors: response.data.topErrors,
             connectedServices: this._awsServices.map(s => s.name),
             conversationHistory: []
@@ -759,8 +778,8 @@ export class DebugCopilot {
           timestamp: new Date(),
           suggestedFix: suggestedFix,
           suggestedPrompts: [
+            'Trigger Investigation',
             'Create a PR with the fix',
-            'Show more error details',
             'Analyze other services'
           ]
         });
@@ -783,6 +802,171 @@ export class DebugCopilot {
         type: 'ai',
         content: `❌ **Analysis Failed**\n\nCould not analyze logs: ${error.response?.data?.message || error.message}\n\nPlease verify:\n• Log group name is correct\n• You have CloudWatch Logs permissions\n• The log group exists in your AWS account`,
         timestamp: new Date()
+      });
+    }
+  }
+
+  /**
+   * Trigger SRE Agent Investigation
+   * Sends comprehensive context to the SRE agent for deep investigation
+   */
+  private async triggerSREInvestigation() {
+    console.log('[Tivra DebugMind] Triggering SRE Agent investigation');
+
+    // Verify we have service context
+    if (!this._conversationContext.service) {
+      this.addMessage({
+        type: 'ai',
+        content: `⚠️ **No Service Context**\n\nPlease analyze a service first before triggering an investigation.`,
+        timestamp: new Date()
+      });
+      return;
+    }
+
+    const service = this._conversationContext.service;
+
+    this.addMessage({
+      type: 'ai',
+      content: `🔍 **Starting Deep Investigation**\n\nTriggering SRE Agent to investigate **${service.name}**...\n\nThe agent will:\n• Analyze CloudWatch logs in detail\n• Review recent code changes from GitHub\n• Correlate deployment timing\n• Form and test hypotheses\n• Provide structured root cause analysis\n\nThis may take 15-30 seconds...`,
+      timestamp: new Date(),
+      isTyping: true
+    });
+
+    try {
+      // Get GitHub repo info from workspace
+      const githubRepo = await this.getGitHubRepoFromWorkspace();
+      const branch = await this.getCurrentBranch();
+
+      // Prepare investigation request with comprehensive context
+      const investigationRequest = {
+        service: {
+          name: service.name,
+          type: service.type,
+          logGroupName: service.logGroupName,
+          region: 'us-east-1'
+        },
+        errors: this._conversationContext.recentErrors.map((error: any) => ({
+          message: error.message || error.type || 'Unknown error',
+          count: error.count || 1,
+          timestamp: error.lastSeen || new Date().toISOString(),
+          stackTrace: error.stackTrace || null,
+          samples: error.samples || []
+        })),
+        // Include pre-fetched CloudWatch data to avoid redundant API calls
+        cloudwatchData: this._errorAnalysisData ? {
+          logs: this._errorAnalysisData.logs,
+          fetchedAt: this._errorAnalysisData.timestamp
+        } : null,
+        context: {
+          githubRepo: githubRepo,
+          branch: branch || 'main',
+          workspace: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+          awsServices: this._awsServices.map(s => s.name),
+          conversationHistory: this._conversationContext.conversationHistory.slice(-5) // Last 5 messages for context
+        }
+      };
+
+      console.log('[Tivra DebugMind] Investigation request:', JSON.stringify(investigationRequest, null, 2));
+
+      // Call SRE Agent via backend
+      const response = await axios.post(
+        `${this._apiUrl}/api/sre-agent/investigate`,
+        investigationRequest,
+        {
+          timeout: 60000 // 60 second timeout
+        }
+      );
+
+      console.log('[Tivra DebugMind] Investigation completed:', response.data.investigation_id);
+
+      // Format the investigation results
+      const investigation = response.data;
+
+      let resultMessage = `## 🎯 Investigation Complete\n\n`;
+      resultMessage += `**Investigation ID:** \`${investigation.investigation_id}\`\n`;
+      resultMessage += `**Confidence:** ${(investigation.confidence * 100).toFixed(0)}%\n\n`;
+
+      // Root Cause
+      if (investigation.root_cause) {
+        const rc = investigation.root_cause;
+        resultMessage += `### 🔴 Root Cause Identified\n\n`;
+        resultMessage += `**Category:** ${rc.category.replace('_', ' ').toUpperCase()}\n`;
+        resultMessage += `**Impact:** ${rc.impact.toUpperCase()}\n`;
+        resultMessage += `**Confidence:** ${(rc.confidence * 100).toFixed(0)}%\n\n`;
+        resultMessage += `**Description:**\n${rc.description}\n\n`;
+      }
+
+      // Evidence Summary
+      if (investigation.evidence && investigation.evidence.length > 0) {
+        resultMessage += `### 📊 Evidence Gathered\n\n`;
+        investigation.evidence.forEach((ev: any, idx: number) => {
+          resultMessage += `${idx + 1}. **${ev.type.toUpperCase()}** - ${ev.description} (Confidence: ${(ev.confidence * 100).toFixed(0)}%)\n`;
+        });
+        resultMessage += '\n';
+      }
+
+      // Suggested Fixes
+      if (investigation.suggested_fixes && investigation.suggested_fixes.length > 0) {
+        resultMessage += `### 💡 Suggested Fixes\n\n`;
+        investigation.suggested_fixes.forEach((fix: any, idx: number) => {
+          resultMessage += `**${idx + 1}. ${fix.type.replace('_', ' ').toUpperCase()}** (Risk: ${fix.risk_level}, Confidence: ${(fix.confidence * 100).toFixed(0)}%)\n`;
+          resultMessage += `${fix.description}\n`;
+          if (fix.estimated_time) {
+            resultMessage += `*Estimated time: ${fix.estimated_time}*\n`;
+          }
+          resultMessage += '\n';
+        });
+      }
+
+      // Reasoning Steps (collapsed)
+      if (investigation.reasoning_steps && investigation.reasoning_steps.length > 0) {
+        resultMessage += `<details>\n<summary>Investigation Steps (${investigation.reasoning_steps.length})</summary>\n\n`;
+        investigation.reasoning_steps.forEach((step: string, idx: number) => {
+          resultMessage += `${idx + 1}. ${step}\n`;
+        });
+        resultMessage += `</details>\n\n`;
+      }
+
+      // Update the message
+      this.updateLastMessage({
+        type: 'ai',
+        content: resultMessage,
+        timestamp: new Date(),
+        suggestedPrompts: [
+          investigation.suggested_fixes && investigation.suggested_fixes.length > 0 ? 'Create a PR with the fix' : 'Analyze other services',
+          'Run another investigation',
+          'Analyze other services'
+        ]
+      });
+
+      // Store investigation results in context
+      this._errorAnalysisData = investigation;
+
+    } catch (error: any) {
+      console.error('[Tivra DebugMind] Investigation failed:', error);
+
+      let errorMessage = `❌ **Investigation Failed**\n\n`;
+
+      if (error.code === 'ECONNREFUSED') {
+        errorMessage += `Could not connect to SRE Agent service.\n\n`;
+        errorMessage += `**Please ensure:**\n`;
+        errorMessage += `• SRE Agent service is running on port 5001\n`;
+        errorMessage += `• Run: \`cd tivra-copilot/sre-agent && python app.py\`\n`;
+      } else if (error.response?.status === 503) {
+        errorMessage += `SRE Agent service is unavailable.\n\n`;
+        errorMessage += `${error.response?.data?.message || 'Service not responding'}\n`;
+      } else {
+        errorMessage += `${error.response?.data?.message || error.message}\n`;
+      }
+
+      this.updateLastMessage({
+        type: 'ai',
+        content: errorMessage,
+        timestamp: new Date(),
+        suggestedPrompts: [
+          'Try again',
+          'Analyze other services'
+        ]
       });
     }
   }
@@ -1369,6 +1553,12 @@ export class DebugCopilot {
       return;
     }
 
+    // Check if user clicked "Trigger Investigation" button
+    if (lowerText === 'trigger investigation') {
+      await this.triggerSREInvestigation();
+      return;
+    }
+
     // Check if user is asking to analyze errors
     const analyzeKeywords = ['analyze', 'error', 'show', 'check', 'debug', 'find'];
     const isAnalyzeRequest = analyzeKeywords.some(keyword => lowerText.includes(keyword)) &&
@@ -1394,6 +1584,7 @@ export class DebugCopilot {
         message: text,
         context: {
           ...this._conversationContext,
+          service: this._conversationContext.service, // Include full service context with logGroupName
           connectedServices: this._conversationContext.service ? [this._conversationContext.service.name] : [],
           // Include error analysis data if available
           errorAnalysis: this._errorAnalysisData,
@@ -1918,6 +2109,94 @@ export class DebugCopilot {
 </html>`;
   }
 
+  /**
+   * Get GitHub repository from workspace
+   * Attempts to extract GitHub repo from git remote URL
+   */
+  private async getGitHubRepoFromWorkspace(): Promise<string | undefined> {
+    try {
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      if (!workspaceFolder) {
+        return undefined;
+      }
+
+      // Try to get git remote URL
+      const gitExtension = vscode.extensions.getExtension('vscode.git')?.exports;
+      if (!gitExtension) {
+        return undefined;
+      }
+
+      const api = gitExtension.getAPI(1);
+      if (!api.repositories || api.repositories.length === 0) {
+        return undefined;
+      }
+
+      const repo = api.repositories[0];
+      const remotes = repo.state.remotes;
+
+      // Look for origin remote
+      const origin = remotes.find((r: any) => r.name === 'origin');
+      if (!origin) {
+        return undefined;
+      }
+
+      // Extract repo from URL (e.g., git@github.com:user/repo.git -> user/repo)
+      const url = origin.fetchUrl || origin.pushUrl;
+      if (!url) {
+        return undefined;
+      }
+
+      // Handle different URL formats
+      let match;
+
+      // SSH format: git@github.com:user/repo.git
+      match = url.match(/git@github\.com:(.+?)\.git$/);
+      if (match) {
+        return match[1];
+      }
+
+      // HTTPS format: https://github.com/user/repo.git
+      match = url.match(/https:\/\/github\.com\/(.+?)\.git$/);
+      if (match) {
+        return match[1];
+      }
+
+      // HTTPS without .git: https://github.com/user/repo
+      match = url.match(/https:\/\/github\.com\/(.+?)$/);
+      if (match) {
+        return match[1];
+      }
+
+      return undefined;
+    } catch (error) {
+      console.error('[Tivra DebugMind] Failed to get GitHub repo:', error);
+      return undefined;
+    }
+  }
+
+  /**
+   * Get current git branch
+   */
+  private async getCurrentBranch(): Promise<string | undefined> {
+    try {
+      const gitExtension = vscode.extensions.getExtension('vscode.git')?.exports;
+      if (!gitExtension) {
+        return undefined;
+      }
+
+      const api = gitExtension.getAPI(1);
+      if (!api.repositories || api.repositories.length === 0) {
+        return undefined;
+      }
+
+      const repo = api.repositories[0];
+      return repo.state.HEAD?.name;
+    } catch (error) {
+      console.error('[Tivra DebugMind] Failed to get current branch:', error);
+      return undefined;
+    }
+  }
+
   // ========================================
   // Real-time Monitoring Methods
   // ========================================
@@ -2098,7 +2377,7 @@ interface CodeFix {
 }
 
 interface ConversationContext {
-  service: { name: string; type: string } | null;
+  service: { name: string; type: string; logGroupName?: string } | null;
   recentErrors: any[];
   appliedFixes: Array<{ filePath: string; code: string; description: string; timestamp?: Date }>;
   conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>;
