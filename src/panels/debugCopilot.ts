@@ -6,6 +6,7 @@ import axios from 'axios';
 import { E2EEncryption } from '../utils/e2e-encryption';
 import { CredentialManager, AWSCredentials } from '../utils/credential-manager';
 import { AnalyticsTracker } from '../analytics/analytics-tracker';
+import { PermissionManager } from '../utils/permission-manager';
 
 export class DebugCopilot {
   public static currentPanel: DebugCopilot | undefined;
@@ -42,11 +43,15 @@ export class DebugCopilot {
   // Analytics
   private _analytics: AnalyticsTracker | undefined;
 
+  // Permission Manager
+  private _permissionManager: PermissionManager;
+
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, apiUrl: string, credentialManager: CredentialManager, analytics?: AnalyticsTracker) {
     this._panel = panel;
     this._apiUrl = apiUrl;
     this._credentialManager = credentialManager;
     this._analytics = analytics;
+    this._permissionManager = new PermissionManager(apiUrl);
 
     // Initialize E2E encryption
     this._encryption = new E2EEncryption(apiUrl);
@@ -826,6 +831,20 @@ export class DebugCopilot {
             'Analyze other services'
           ]
         });
+
+        // Auto-trigger SRE investigation if enabled
+        const autoInvestigationEnabled = vscode.workspace.getConfiguration('tivra').get<boolean>('autoInvestigation', true);
+        if (autoInvestigationEnabled && this._conversationContext.recentErrors.length > 0) {
+          // Small delay to let user see the RCA first
+          setTimeout(async () => {
+            this.addMessage({
+              type: 'system',
+              content: `🤖 Auto-triggering deep investigation...`,
+              timestamp: new Date()
+            });
+            await this.triggerSREInvestigation();
+          }, 2000);
+        }
       } else {
         this.addMessage({
           type: 'ai',
