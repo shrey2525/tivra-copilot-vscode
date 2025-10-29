@@ -46,6 +46,15 @@ export class DebugCopilot {
   // Permission Manager
   private _permissionManager: PermissionManager;
 
+  // GitHub OAuth data
+  private _githubData: {
+    token: string;
+    owner: string;
+    repo: string;
+    baseBranch: string;
+    user: any;
+  } | null = null;
+
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, apiUrl: string, credentialManager: CredentialManager, analytics?: AnalyticsTracker) {
     this._panel = panel;
     this._apiUrl = apiUrl;
@@ -136,8 +145,10 @@ export class DebugCopilot {
           timestamp: new Date()
         });
 
-        // Fetch and display services
+        // Fetch and display services - this will start the seamless flow
         await this.fetchAWSServices(region);
+
+        // Don't check GitHub here - will prompt after RCA
       } else {
         this.addMessage({
           type: 'ai',
@@ -824,26 +835,35 @@ export class DebugCopilot {
           type: 'ai',
           content: `## 🔍 Root Cause Analysis\n\n${rcaText}`,
           timestamp: new Date(),
-          suggestedFix: suggestedFix,
-          suggestedPrompts: [
-            'Trigger Investigation',
-            'Create a PR with the fix',
-            'Analyze other services'
-          ]
+          suggestedFix: suggestedFix
         });
 
-        // Auto-trigger SRE investigation if enabled
+        // Check if GitHub is connected before investigation
         const autoInvestigationEnabled = vscode.workspace.getConfiguration('tivra').get<boolean>('autoInvestigation', true);
         if (autoInvestigationEnabled && this._conversationContext.recentErrors.length > 0) {
-          // Small delay to let user see the RCA first
-          setTimeout(async () => {
+          // Check GitHub connection status first
+          const githubConnected = await this.isGitHubConnected();
+
+          if (!githubConnected) {
+            // Prompt to connect GitHub for better investigation
+            this.addMessage({
+              type: 'ai',
+              content: `\n**📊 Ready for Deep Investigation**\n\nI can start investigating now, but connecting GitHub first will significantly improve results:\n\n**Without GitHub (~30% confidence):**\n• Basic log analysis only\n• Cannot analyze code changes\n• Generic fix suggestions\n\n**With GitHub (~90% confidence):**\n• Full code context analysis\n• Identify which commit caused the issue\n• Generate accurate, specific fixes\n• Auto-create PRs with fixes\n\nWould you like to connect GitHub first?`,
+              timestamp: new Date(),
+              suggestedPrompts: [
+                'Connect GitHub (Recommended)',
+                'Skip - Investigate without GitHub'
+              ]
+            });
+          } else {
+            // GitHub connected, proceed immediately
             this.addMessage({
               type: 'system',
-              content: `🤖 Auto-triggering deep investigation...`,
+              content: `🤖 Starting deep investigation with GitHub context...`,
               timestamp: new Date()
             });
             await this.triggerSREInvestigation();
-          }, 2000);
+          }
         }
       } else {
         this.addMessage({
@@ -895,9 +915,23 @@ export class DebugCopilot {
     });
 
     try {
-      // Get GitHub repo info from workspace
-      const githubRepo = await this.getGitHubRepoFromWorkspace();
-      const branch = await this.getCurrentBranch();
+      // Get GitHub context - prefer stored OAuth data over workspace detection
+      let githubRepo: string | undefined;
+      let githubToken: string | undefined;
+      let branch: string | undefined;
+
+      if (this._githubData) {
+        // Use OAuth data if available
+        githubRepo = `${this._githubData.owner}/${this._githubData.repo}`;
+        githubToken = this._githubData.token;
+        branch = this._githubData.baseBranch;
+        console.log(`[Tivra DebugMind] Using OAuth GitHub data: ${githubRepo}`);
+      } else {
+        // Fall back to workspace detection
+        githubRepo = await this.getGitHubRepoFromWorkspace();
+        branch = await this.getCurrentBranch();
+        console.log(`[Tivra DebugMind] Using workspace GitHub data: ${githubRepo || 'none'}`);
+      }
 
       // Prepare investigation request with comprehensive context
       const investigationRequest = {
@@ -921,6 +955,7 @@ export class DebugCopilot {
         } : null,
         context: {
           githubRepo: githubRepo,
+          githubToken: githubToken,  // Include token for private repos
           branch: branch || 'main',
           workspace: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
           awsServices: this._awsServices.map(s => s.name),
@@ -993,16 +1028,14 @@ export class DebugCopilot {
       this.updateLastMessage({
         type: 'ai',
         content: resultMessage,
-        timestamp: new Date(),
-        suggestedPrompts: [
-          investigation.suggested_fixes && investigation.suggested_fixes.length > 0 ? 'Create a PR with the fix' : 'Analyze other services',
-          'Run another investigation',
-          'Analyze other services'
-        ]
+        timestamp: new Date()
       });
 
       // Store investigation results in context
       this._errorAnalysisData = investigation;
+
+      // Check if GitHub is connected - prompt if not
+      await this.checkGitHubConnectionAfterInvestigation();
 
     } catch (error: any) {
       console.error('[Tivra DebugMind] Investigation failed:', error);
@@ -1523,6 +1556,42 @@ export class DebugCopilot {
     if ((lowerText.includes('disconnect') || lowerText.includes('logout') || lowerText.includes('reset')) &&
         lowerText.includes('aws')) {
       await this.disconnectFromAWS();
+      return;
+    }
+
+    // Check if user wants to connect GitHub
+    if (lowerText.includes('connect github') || lowerText.includes('connect to github')) {
+      await this.startGitHubOAuth();
+      return;
+    }
+
+    // Check if user wants to retry GitHub connection
+    if (lowerText.includes('retry github') || lowerText.includes('check github status')) {
+      await this.checkGitHubConnection();
+      return;
+    }
+
+    // Check if user wants to skip GitHub and proceed with investigation
+    if ((lowerText.includes('skip') && lowerText.includes('investigate')) ||
+        lowerText.includes('investigate without github')) {
+      this.addMessage({
+        type: 'system',
+        content: `🤖 Starting investigation without GitHub context...`,
+        timestamp: new Date()
+      });
+      await this.triggerSREInvestigation();
+      return;
+    }
+
+    // Check if user wants to skip GitHub (general)
+    if (lowerText.includes('skip for now') || lowerText.includes('skip github') ||
+        (lowerText.includes('skip') && lowerText.includes('connect'))) {
+      this.addMessage({
+        type: 'system',
+        content: `🤖 Proceeding with investigation (without GitHub context)...`,
+        timestamp: new Date()
+      });
+      await this.triggerSREInvestigation();
       return;
     }
 
@@ -2177,19 +2246,30 @@ export class DebugCopilot {
    */
   private async getGitHubRepoFromWorkspace(): Promise<string | undefined> {
     try {
+      // First, check if user has manually configured the GitHub repo
+      const configuredRepo = vscode.workspace.getConfiguration('tivra').get<string>('githubRepo');
+      if (configuredRepo && configuredRepo.trim()) {
+        console.log('[Tivra DebugMind] Using configured GitHub repo:', configuredRepo);
+        return configuredRepo.trim();
+      }
+
+      // Otherwise, try to auto-detect from git remote
       const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
       if (!workspaceFolder) {
+        console.log('[Tivra DebugMind] No workspace folder, cannot auto-detect GitHub repo');
         return undefined;
       }
 
       // Try to get git remote URL
       const gitExtension = vscode.extensions.getExtension('vscode.git')?.exports;
       if (!gitExtension) {
+        console.log('[Tivra DebugMind] Git extension not found, cannot auto-detect GitHub repo');
         return undefined;
       }
 
       const api = gitExtension.getAPI(1);
       if (!api.repositories || api.repositories.length === 0) {
+        console.log('[Tivra DebugMind] No git repositories found, cannot auto-detect GitHub repo');
         return undefined;
       }
 
@@ -2199,12 +2279,14 @@ export class DebugCopilot {
       // Look for origin remote
       const origin = remotes.find((r: any) => r.name === 'origin');
       if (!origin) {
+        console.log('[Tivra DebugMind] No origin remote found, cannot auto-detect GitHub repo');
         return undefined;
       }
 
       // Extract repo from URL (e.g., git@github.com:user/repo.git -> user/repo)
       const url = origin.fetchUrl || origin.pushUrl;
       if (!url) {
+        console.log('[Tivra DebugMind] No remote URL found, cannot auto-detect GitHub repo');
         return undefined;
       }
 
@@ -2214,21 +2296,25 @@ export class DebugCopilot {
       // SSH format: git@github.com:user/repo.git
       match = url.match(/git@github\.com:(.+?)\.git$/);
       if (match) {
+        console.log('[Tivra DebugMind] Auto-detected GitHub repo from SSH URL:', match[1]);
         return match[1];
       }
 
       // HTTPS format: https://github.com/user/repo.git
       match = url.match(/https:\/\/github\.com\/(.+?)\.git$/);
       if (match) {
+        console.log('[Tivra DebugMind] Auto-detected GitHub repo from HTTPS URL:', match[1]);
         return match[1];
       }
 
       // HTTPS without .git: https://github.com/user/repo
       match = url.match(/https:\/\/github\.com\/(.+?)$/);
       if (match) {
+        console.log('[Tivra DebugMind] Auto-detected GitHub repo from HTTPS URL (no .git):', match[1]);
         return match[1];
       }
 
+      console.log('[Tivra DebugMind] Could not parse GitHub repo from remote URL:', url);
       return undefined;
     } catch (error) {
       console.error('[Tivra DebugMind] Failed to get GitHub repo:', error);
@@ -2257,6 +2343,217 @@ export class DebugCopilot {
       console.error('[Tivra DebugMind] Failed to get current branch:', error);
       return undefined;
     }
+  }
+
+  /**
+   * Check if GitHub is connected (returns boolean)
+   */
+  private async isGitHubConnected(): Promise<boolean> {
+    try {
+      const response = await axios.get(`${this._apiUrl}/api/github/status`);
+      return response.data.connected === true;
+    } catch (error) {
+      console.error('[Tivra DebugMind] Failed to check GitHub status:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Check GitHub connection status and prompt if needed
+   */
+  private async checkGitHubConnection() {
+    try {
+      const response = await axios.get(`${this._apiUrl}/api/github/status`);
+
+      if (response.data.connected) {
+        console.log('[Tivra DebugMind] GitHub connected:', response.data.owner + '/' + response.data.repo);
+        this.addMessage({
+          type: 'ai',
+          content: `**GitHub Connected** ✅\n\nRepository: ${response.data.owner}/${response.data.repo}\nBranch: ${response.data.baseBranch}\n\nYou're all set! The SRE Agent will use this repository for code context during investigations.`,
+          timestamp: new Date()
+        });
+      } else {
+        // Not connected, prompt user
+        this.addMessage({
+          type: 'ai',
+          content: `**Connect to GitHub** 🔗\n\nFor better investigation accuracy, connect your GitHub repository. This allows the SRE Agent to:\n\n• Analyze recent code changes\n• Fetch source code for context\n• Generate accurate fixes\n• Create pull requests automatically\n\nYou can connect now or skip this step.`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Connect GitHub',
+            'Skip for now'
+          ]
+        });
+      }
+    } catch (error) {
+      console.error('[Tivra DebugMind] Failed to check GitHub status:', error);
+      // Don't show error to user, just log it
+    }
+  }
+
+  /**
+   * Check GitHub connection after investigation completes
+   * Only prompts if not connected, otherwise silent
+   */
+  private async checkGitHubConnectionAfterInvestigation() {
+    try {
+      // Check local OAuth data first (VSCode stores GitHub data locally)
+      if (this._githubData) {
+        console.log('[Tivra DebugMind] GitHub already connected via OAuth, no prompt needed');
+
+        // Show next steps with fix options
+        this.addMessage({
+          type: 'ai',
+          content: `\n**✅ Next Steps**\n\nGitHub is connected. You can now:\n\n• Request automatic PR creation\n• Ask me to explain the fix\n• Analyze another service`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Create a PR with the fix',
+            'Explain the fix',
+            'Analyze another service'
+          ]
+        });
+        return;
+      }
+
+      // Fallback: check server session (for web portal compatibility)
+      const response = await axios.get(`${this._apiUrl}/api/github/status`);
+
+      if (!response.data.connected) {
+        // Not connected, prompt user to connect for better fixes
+        this.addMessage({
+          type: 'ai',
+          content: `\n**💡 Tip: Connect GitHub for Better Fixes**\n\nThe investigation is complete, but connecting GitHub will enable:\n\n• Automatic PR creation with fixes\n• Code analysis for more accurate solutions\n• Tracking of code changes that caused errors\n\nWould you like to connect now?`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Connect GitHub',
+            'Skip - I\'ll connect later'
+          ]
+        });
+      } else {
+        console.log('[Tivra DebugMind] GitHub already connected, no prompt needed');
+
+        // Show next steps with fix options
+        this.addMessage({
+          type: 'ai',
+          content: `\n**✅ Next Steps**\n\nGitHub is connected. You can now:\n\n• Request automatic PR creation\n• Ask me to explain the fix\n• Analyze another service`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Create a PR with the fix',
+            'Explain the fix',
+            'Analyze another service'
+          ]
+        });
+      }
+    } catch (error) {
+      console.error('[Tivra DebugMind] Failed to check GitHub status:', error);
+      // Don't show error to user, just log it
+    }
+  }
+
+  /**
+   * Start GitHub OAuth flow
+   */
+  private async startGitHubOAuth() {
+    this.addMessage({
+      type: 'system',
+      content: `🔄 Opening GitHub OAuth in your browser...`,
+      timestamp: new Date()
+    });
+
+    try {
+      // Generate unique state token for polling
+      const state = `vscode-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+      // Open OAuth URL in browser with state
+      const authUrl = `${this._apiUrl}/api/github/auth?vscode_state=${state}`;
+      await vscode.env.openExternal(vscode.Uri.parse(authUrl));
+
+      this.addMessage({
+        type: 'system',
+        content: `🔄 Polling for GitHub authorization...`,
+        timestamp: new Date()
+      });
+
+      // Poll for connection status with state token
+      this.pollForGitHubConnection(state);
+    } catch (error: any) {
+      console.error('[Tivra DebugMind] GitHub OAuth failed:', error);
+      this.addMessage({
+        type: 'ai',
+        content: `⚠️ **GitHub OAuth Error**\n\nFailed to start OAuth flow: ${error.message}\n\nYou can try again later or skip this step.`,
+        timestamp: new Date(),
+        suggestedPrompts: [
+          'Retry GitHub',
+          'Skip for now'
+        ]
+      });
+    }
+  }
+
+  /**
+   * Poll for GitHub connection status using state token
+   */
+  private async pollForGitHubConnection(state: string) {
+    let attempts = 0;
+    const maxAttempts = 60; // 60 seconds
+
+    console.log(`[Tivra DebugMind] Polling for GitHub OAuth completion with state: ${state}`);
+
+    const poll = setInterval(async () => {
+      attempts++;
+
+      try {
+        // Poll the specific endpoint with state token
+        const response = await axios.get(`${this._apiUrl}/api/github/auth/poll/${state}`);
+
+        if (response.data.connected) {
+          clearInterval(poll);
+
+          console.log('[Tivra DebugMind] GitHub OAuth completed successfully');
+
+          // Store GitHub data for use in investigations
+          this._githubData = {
+            token: response.data.githubToken,
+            owner: response.data.owner,
+            repo: response.data.repo,
+            baseBranch: response.data.baseBranch,
+            user: response.data.user
+          };
+
+          console.log(`[Tivra DebugMind] Stored GitHub data: ${this._githubData.owner}/${this._githubData.repo}`);
+
+          this.addMessage({
+            type: 'ai',
+            content: `✅ **GitHub Connected Successfully!**\n\nRepository: ${response.data.owner}/${response.data.repo}\nBranch: ${response.data.baseBranch}\n\nThe SRE Agent will now use this repository for code analysis during investigations.`,
+            timestamp: new Date()
+          });
+
+          // If we're in the investigation flow, proceed with investigation
+          if (this._conversationContext.recentErrors.length > 0) {
+            this.addMessage({
+              type: 'system',
+              content: `🤖 Starting deep investigation with GitHub context...`,
+              timestamp: new Date()
+            });
+            await this.triggerSREInvestigation();
+          }
+        }
+      } catch (error) {
+        console.error('[Tivra DebugMind] Poll error:', error);
+      }
+
+      if (attempts >= maxAttempts) {
+        clearInterval(poll);
+        this.addMessage({
+          type: 'ai',
+          content: `⚠️ **GitHub Authorization Not Detected**\n\nDidn't receive authorization after 60 seconds. This could mean:\n• OAuth flow was cancelled\n• Authorization wasn't completed\n• Network connectivity issue\n\nWould you like to try again or proceed without GitHub?`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Connect GitHub',
+            'Skip - Investigate without GitHub'
+          ]
+        });
+      }
+    }, 1000); // Check every second
   }
 
   // ========================================

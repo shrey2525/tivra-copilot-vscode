@@ -68,6 +68,11 @@
           "type": "string",
           "default": "us-east-1",
           "description": "AWS Region"
+        },
+        "tivra.githubRepo": {
+          "type": "string",
+          "default": "",
+          "description": "GitHub repository for code context (e.g., 'owner/repo'). If not set, will auto-detect from git remote."
         }
       }
     }
