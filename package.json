@@ -2,7 +2,7 @@
   "name": "tivra-debugmind",
   "displayName": "Tivra DebugMind",
   "description": "AI debugging copilot for production services. Automatically fetches logs, analyzes errors, performs RCA, and suggests fixes.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "shreychaturvedi",
   "license": "MIT",
   "icon": "media/logo.png",
@@ -68,6 +68,11 @@
           "type": "string",
           "default": "us-east-1",
           "description": "AWS Region"
+        },
+        "tivra.githubRepo": {
+          "type": "string",
+          "default": "",
+          "description": "GitHub repository for code context (e.g., 'owner/repo'). If not set, will auto-detect from git remote."
         }
       }
     }

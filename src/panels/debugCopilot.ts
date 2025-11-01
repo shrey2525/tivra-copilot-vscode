@@ -23,15 +23,13 @@ export class DebugCopilot {
     serviceName?: string;
     logGroupName?: string;
   } | null = null;
-  private _monitoringInterval: NodeJS.Timeout | null = null;
   private _isMonitoring: boolean = false;
   private _awsServices: any[] = [];
   private _errorAnalysisData: any = null; // Store analysis for context
   private _servicesNeedingLogGroup: any[] = []; // Services that need manual log group config
 
-  // Real-time monitoring with polling only (WebSocket removed)
-  private _pollingInterval: NodeJS.Timeout | null = null;
-  private _lastPollTime: Map<string, number> = new Map(); // Track last poll time per service
+  // Autonomous monitoring (agent-side, no polling)
+  private _autonomousMonitoringActive: boolean = false;
 
   // E2E Encryption
   private _encryption: E2EEncryption | null = null;
@@ -46,12 +44,43 @@ export class DebugCopilot {
   // Permission Manager
   private _permissionManager: PermissionManager;
 
-  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, apiUrl: string, credentialManager: CredentialManager, analytics?: AnalyticsTracker) {
+  // Extension context (for globalState persistence)
+  private _context: vscode.ExtensionContext;
+
+  // GitHub OAuth data
+  private _githubData: {
+    token: string;
+    owner: string;
+    repo: string;
+    baseBranch: string;
+    user: any;
+  } | null = null;
+
+  // Last investigation result (for "Explain the fix")
+  private _lastInvestigationResult: any = null;
+
+  // Pending feedback session ID (for post-validation feedback)
+  private _pendingFeedbackSessionId: string | null = null;
+
+  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, context: vscode.ExtensionContext, apiUrl: string, credentialManager: CredentialManager, analytics?: AnalyticsTracker) {
     this._panel = panel;
+    this._context = context;
     this._apiUrl = apiUrl;
     this._credentialManager = credentialManager;
     this._analytics = analytics;
     this._permissionManager = new PermissionManager(apiUrl);
+
+    // Restore GitHub OAuth data from globalState (persists across reloads)
+    this._githubData = this._context.globalState.get('tivra_github_data') || null;
+    if (this._githubData) {
+      console.log(`[Tivra DebugMind] Restored GitHub connection: ${this._githubData.owner}/${this._githubData.repo}`);
+    }
+
+    // Restore AWS services from globalState (persists across reloads)
+    this._awsServices = this._context.globalState.get('tivra_aws_services') || [];
+    if (this._awsServices.length > 0) {
+      console.log(`[Tivra DebugMind] Restored ${this._awsServices.length} AWS service(s) from previous session`);
+    }
 
     // Initialize E2E encryption
     this._encryption = new E2EEncryption(apiUrl);
@@ -136,7 +165,7 @@ export class DebugCopilot {
           timestamp: new Date()
         });
 
-        // Fetch and display services
+        // Fetch and display services - this will start the seamless flow
         await this.fetchAWSServices(region);
       } else {
         this.addMessage({
@@ -163,7 +192,7 @@ export class DebugCopilot {
     }
   }
 
-  public static createOrShow(extensionUri: vscode.Uri, apiUrl: string, credentialManager: CredentialManager, analytics?: AnalyticsTracker) {
+  public static createOrShow(extensionUri: vscode.Uri, context: vscode.ExtensionContext, apiUrl: string, credentialManager: CredentialManager, analytics?: AnalyticsTracker) {
     const column = vscode.ViewColumn.Two;
 
     if (DebugCopilot.currentPanel) {
@@ -183,7 +212,7 @@ export class DebugCopilot {
       }
     );
 
-    DebugCopilot.currentPanel = new DebugCopilot(panel, extensionUri, apiUrl, credentialManager, analytics);
+    DebugCopilot.currentPanel = new DebugCopilot(panel, extensionUri, context, apiUrl, credentialManager, analytics);
     analytics?.trackFeatureUsage('copilot', 'create_new');
     return DebugCopilot.currentPanel;
   }
@@ -378,6 +407,10 @@ export class DebugCopilot {
       // Clear local state
       this._awsServices = [];
       this._awsConnectionState = null;
+
+      // Clear persisted services from globalState
+      await this._context.globalState.update('tivra_aws_services', []);
+      console.log('[Tivra DebugMind] Cleared persisted AWS services');
 
       this.addMessage({
         type: 'ai',
@@ -681,8 +714,16 @@ export class DebugCopilot {
       const response = await axios.get(`${this._apiUrl}/api/aws/services/discover`);
       console.log('[Tivra DebugMind] Services response:', response.data);
 
-      this._awsServices = response.data.services || [];
+      // Add region to each service
+      this._awsServices = (response.data.services || []).map((service: any) => ({
+        ...service,
+        region: region
+      }));
       console.log(`[Tivra DebugMind] Found ${this._awsServices.length} services`);
+
+      // Persist discovered services to globalState
+      await this._context.globalState.update('tivra_aws_services', this._awsServices);
+      console.log(`[Tivra DebugMind] Persisted ${this._awsServices.length} AWS services`);
 
       if (this._awsServices.length > 0) {
         // Build services list message
@@ -747,13 +788,29 @@ export class DebugCopilot {
       console.log(`  Message: ${response.data.message || 'N/A'}`);
 
       if (response.data.errorCount > 0) {
+        // Find service from discovered services to get region
+        const awsService = this._awsServices.find(s => s.name === serviceName);
+
         // Store service context with log group for later use
         this._conversationContext.service = {
           name: serviceName,
           type: serviceType,
-          logGroupName: logGroupName
+          logGroupName: logGroupName,
+          region: awsService?.region || this._awsConnectionState?.region || 'us-east-1'
         };
         this._conversationContext.recentErrors = response.data.topErrors;
+
+        // Update the service in _awsServices array with logGroupName for persistence
+        const serviceIndex = this._awsServices.findIndex(s => s.name === serviceName);
+        if (serviceIndex !== -1) {
+          this._awsServices[serviceIndex] = {
+            ...this._awsServices[serviceIndex],
+            logGroupName: logGroupName
+          };
+          // Persist to globalState
+          await this._context.globalState.update('tivra_aws_services', this._awsServices);
+          console.log(`[Tivra DebugMind] Persisted logGroupName for ${serviceName}`);
+        }
 
         // Store complete CloudWatch analysis for SRE agent
         this._errorAnalysisData = {
@@ -772,79 +829,48 @@ export class DebugCopilot {
           errorCount: response.data.errorCount
         });
 
-        // Show errors found
+        // Show errors found with summary
         let errorMessage = `**⚠️ Errors Found in ${serviceName}**\n\n`;
-        errorMessage += `Found ${response.data.errorCount} error(s) in the last hour.\n\n`;
+        errorMessage += `Found **${response.data.errorCount} error(s)** in the last hour.\n\n`;
 
-        // Show top errors
+        // Show top errors with more details
         if (response.data.topErrors && response.data.topErrors.length > 0) {
-          errorMessage += `**Top Errors:**\n\n`;
-          response.data.topErrors.slice(0, 3).forEach((err: any, i: number) => {
-            errorMessage += `${i + 1}. **${err.message}** (${err.count} occurrences)\n`;
+          errorMessage += `**Top Errors (showing ${Math.min(5, response.data.topErrors.length)}):**\n\n`;
+          response.data.topErrors.slice(0, 5).forEach((err: any, i: number) => {
+            errorMessage += `${i + 1}. **${err.message || err.type}**\n`;
+            errorMessage += `   • Occurrences: ${err.count}\n`;
+            if (err.lastSeen) {
+              errorMessage += `   • Last seen: ${new Date(err.lastSeen).toLocaleString()}\n`;
+            }
+            errorMessage += '\n';
           });
+
+          // Add summary statistics
+          const totalOccurrences = response.data.topErrors.reduce((sum: number, err: any) => sum + (err.count || 0), 0);
+          errorMessage += `**Summary:**\n`;
+          errorMessage += `• Total error occurrences: ${totalOccurrences}\n`;
+          errorMessage += `• Unique error types: ${response.data.topErrors.length}\n`;
+          errorMessage += `• Time period: Last 60 minutes\n`;
         }
 
-        errorMessage += `\n**Generating Root Cause Analysis...**`;
-
+        // Show errors with two-path prompts (explain or investigate)
         this.addMessage({
           type: 'ai',
           content: errorMessage,
-          timestamp: new Date()
-        });
-
-        // Call Claude for RCA
-        const rcaResponse = await axios.post(`${this._apiUrl}/api/chat`, {
-          message: `Analyze these errors and provide root cause analysis with fixes:\n\nService: ${serviceName}\nType: ${serviceType}\nLog Group: ${logGroupName}\nErrors: ${JSON.stringify(response.data.topErrors.slice(0, 3), null, 2)}`,
-          context: {
-            service: {
-              name: serviceName,
-              type: serviceType,
-              logGroupName: logGroupName
-            },
-            recentErrors: response.data.topErrors,
-            connectedServices: this._awsServices.map(s => s.name),
-            conversationHistory: []
-          }
-        });
-
-        const { response: rcaText, suggestedFix } = rcaResponse.data;
-
-        // Track successful analysis completion
-        this._analytics?.trackFunnelStep('first_analysis_completed', {
-          serviceName,
-          serviceType,
-          hasFix: !!suggestedFix
-        });
-        this._analytics?.trackFeatureUsage('service', 'analyze_complete', {
-          serviceType,
-          hasFix: !!suggestedFix
-        });
-
-        this.addMessage({
-          type: 'ai',
-          content: `## 🔍 Root Cause Analysis\n\n${rcaText}`,
           timestamp: new Date(),
-          suggestedFix: suggestedFix,
           suggestedPrompts: [
-            'Trigger Investigation',
-            'Create a PR with the fix',
-            'Analyze other services'
+            'Explain errors in detail',
+            'Start investigation',
+            'Skip for now'
           ]
         });
 
-        // Auto-trigger SRE investigation if enabled
-        const autoInvestigationEnabled = vscode.workspace.getConfiguration('tivra').get<boolean>('autoInvestigation', true);
-        if (autoInvestigationEnabled && this._conversationContext.recentErrors.length > 0) {
-          // Small delay to let user see the RCA first
-          setTimeout(async () => {
-            this.addMessage({
-              type: 'system',
-              content: `🤖 Auto-triggering deep investigation...`,
-              timestamp: new Date()
-            });
-            await this.triggerSREInvestigation();
-          }, 2000);
-        }
+        // Track error detection
+        this._analytics?.trackFeatureUsage('service', 'errors_found', {
+          serviceName,
+          serviceType,
+          errorCount: response.data.errorCount
+        });
       } else {
         this.addMessage({
           type: 'ai',
@@ -887,17 +913,47 @@ export class DebugCopilot {
 
     const service = this._conversationContext.service;
 
+    // Build investigation message based on GitHub connection
+    const hasGitHub = !!this._githubData || !!(await this.getGitHubRepoFromWorkspace());
+    let investigationMsg = `🔍 **Starting Deep Investigation**\n\nTriggering SRE Agent to investigate **${service.name}**...\n\nThe agent will:\n• Analyze CloudWatch logs in detail\n`;
+
+    if (hasGitHub) {
+      investigationMsg += `• Review recent code changes from GitHub\n`;
+      investigationMsg += `• Correlate deployment timing\n`;
+    } else {
+      investigationMsg += `• Analyze error patterns and frequency\n`;
+      investigationMsg += `• Identify potential root causes\n`;
+    }
+
+    investigationMsg += `• Form and test hypotheses\n`;
+    investigationMsg += `• Provide structured root cause analysis\n\n`;
+    investigationMsg += `This may take 15-30 seconds...`;
+
     this.addMessage({
       type: 'ai',
-      content: `🔍 **Starting Deep Investigation**\n\nTriggering SRE Agent to investigate **${service.name}**...\n\nThe agent will:\n• Analyze CloudWatch logs in detail\n• Review recent code changes from GitHub\n• Correlate deployment timing\n• Form and test hypotheses\n• Provide structured root cause analysis\n\nThis may take 15-30 seconds...`,
+      content: investigationMsg,
       timestamp: new Date(),
       isTyping: true
     });
 
     try {
-      // Get GitHub repo info from workspace
-      const githubRepo = await this.getGitHubRepoFromWorkspace();
-      const branch = await this.getCurrentBranch();
+      // Get GitHub context - prefer stored OAuth data over workspace detection
+      let githubRepo: string | undefined;
+      let githubToken: string | undefined;
+      let branch: string | undefined;
+
+      if (this._githubData) {
+        // Use OAuth data if available
+        githubRepo = `${this._githubData.owner}/${this._githubData.repo}`;
+        githubToken = this._githubData.token;
+        branch = this._githubData.baseBranch;
+        console.log(`[Tivra DebugMind] Using OAuth GitHub data: ${githubRepo}`);
+      } else {
+        // Fall back to workspace detection
+        githubRepo = await this.getGitHubRepoFromWorkspace();
+        branch = await this.getCurrentBranch();
+        console.log(`[Tivra DebugMind] Using workspace GitHub data: ${githubRepo || 'none'}`);
+      }
 
       // Prepare investigation request with comprehensive context
       const investigationRequest = {
@@ -905,7 +961,7 @@ export class DebugCopilot {
           name: service.name,
           type: service.type,
           logGroupName: service.logGroupName,
-          region: 'us-east-1'
+          region: service.region || this._awsConnectionState?.region || 'us-east-1'
         },
         errors: this._conversationContext.recentErrors.map((error: any) => ({
           message: error.message || error.type || 'Unknown error',
@@ -921,6 +977,7 @@ export class DebugCopilot {
         } : null,
         context: {
           githubRepo: githubRepo,
+          githubToken: githubToken,  // Include token for private repos
           branch: branch || 'main',
           workspace: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
           awsServices: this._awsServices.map(s => s.name),
@@ -944,35 +1001,49 @@ export class DebugCopilot {
       // Format the investigation results
       const investigation = response.data;
 
+      // Store for "Explain the fix" handler
+      this._lastInvestigationResult = investigation;
+
       let resultMessage = `## 🎯 Investigation Complete\n\n`;
-      resultMessage += `**Investigation ID:** \`${investigation.investigation_id}\`\n`;
-      resultMessage += `**Confidence:** ${(investigation.confidence * 100).toFixed(0)}%\n\n`;
+      resultMessage += `**Session ID:** \`${investigation.session_id || investigation.investigation_id}\`\n`;
+      resultMessage += `**Confidence:** ${((investigation.root_cause_confidence || investigation.confidence || 0) * 100).toFixed(0)}%\n\n`;
 
-      // Root Cause
+      // Root Cause (v2 format: string, or v1 format: object)
       if (investigation.root_cause) {
-        const rc = investigation.root_cause;
-        resultMessage += `### 🔴 Root Cause Identified\n\n`;
-        resultMessage += `**Category:** ${rc.category.replace('_', ' ').toUpperCase()}\n`;
-        resultMessage += `**Impact:** ${rc.impact.toUpperCase()}\n`;
-        resultMessage += `**Confidence:** ${(rc.confidence * 100).toFixed(0)}%\n\n`;
-        resultMessage += `**Description:**\n${rc.description}\n\n`;
+        resultMessage += `### 🔴 Root Cause\n\n`;
+
+        if (typeof investigation.root_cause === 'string') {
+          // v2 format: root_cause is a string
+          resultMessage += `${investigation.root_cause}\n\n`;
+        } else {
+          // v1 format: root_cause is an object
+          const rc = investigation.root_cause;
+          resultMessage += `**Category:** ${rc.category?.replace('_', ' ').toUpperCase() || 'UNKNOWN'}\n`;
+          resultMessage += `**Impact:** ${rc.impact?.toUpperCase() || 'UNKNOWN'}\n`;
+          resultMessage += `**Confidence:** ${((rc.confidence || 0) * 100).toFixed(0)}%\n\n`;
+          resultMessage += `**Description:**\n${rc.description || 'No description'}\n\n`;
+        }
       }
 
-      // Evidence Summary
-      if (investigation.evidence && investigation.evidence.length > 0) {
-        resultMessage += `### 📊 Evidence Gathered\n\n`;
-        investigation.evidence.forEach((ev: any, idx: number) => {
-          resultMessage += `${idx + 1}. **${ev.type.toUpperCase()}** - ${ev.description} (Confidence: ${(ev.confidence * 100).toFixed(0)}%)\n`;
-        });
-        resultMessage += '\n';
-      }
+      // Suggested Fix (v2 format: single fix, v1 format: array)
+      if (investigation.suggested_fix) {
+        // v2 format: single suggested_fix string
+        resultMessage += `### 💡 Suggested Fix\n\n`;
+        resultMessage += `**Type:** ${investigation.fix_type || 'Unknown'}\n`;
+        resultMessage += `${investigation.suggested_fix}\n\n`;
 
-      // Suggested Fixes
-      if (investigation.suggested_fixes && investigation.suggested_fixes.length > 0) {
+        if (investigation.fix_file) {
+          resultMessage += `**File:** \`${investigation.fix_file}\`\n`;
+        }
+        if (investigation.fix_code) {
+          resultMessage += `\n**Code:**\n\`\`\`\n${investigation.fix_code}\n\`\`\`\n\n`;
+        }
+      } else if (investigation.suggested_fixes && investigation.suggested_fixes.length > 0) {
+        // v1 format: array of suggested_fixes
         resultMessage += `### 💡 Suggested Fixes\n\n`;
         investigation.suggested_fixes.forEach((fix: any, idx: number) => {
-          resultMessage += `**${idx + 1}. ${fix.type.replace('_', ' ').toUpperCase()}** (Risk: ${fix.risk_level}, Confidence: ${(fix.confidence * 100).toFixed(0)}%)\n`;
-          resultMessage += `${fix.description}\n`;
+          resultMessage += `**${idx + 1}. ${fix.type?.replace('_', ' ').toUpperCase() || 'FIX'}** (Risk: ${fix.risk_level || 'Unknown'}, Confidence: ${((fix.confidence || 0) * 100).toFixed(0)}%)\n`;
+          resultMessage += `${fix.description || 'No description'}\n`;
           if (fix.estimated_time) {
             resultMessage += `*Estimated time: ${fix.estimated_time}*\n`;
           }
@@ -980,7 +1051,45 @@ export class DebugCopilot {
         });
       }
 
-      // Reasoning Steps (collapsed)
+      // Evidence Summary (v2 format: object, v1 format: array)
+      if (investigation.evidence) {
+        if (Array.isArray(investigation.evidence)) {
+          // v1 format: evidence is an array
+          if (investigation.evidence.length > 0) {
+            resultMessage += `### 📊 Evidence Gathered\n\n`;
+            investigation.evidence.forEach((ev: any, idx: number) => {
+              resultMessage += `${idx + 1}. **${ev.type?.toUpperCase() || 'EVIDENCE'}** - ${ev.description || 'No description'} (Confidence: ${((ev.confidence || 0) * 100).toFixed(0)}%)\n`;
+            });
+            resultMessage += '\n';
+          }
+        } else {
+          // v2 format: evidence is an object with logs, metrics, code_diff, deployment
+          resultMessage += `### 📊 Evidence Gathered\n\n`;
+
+          if (investigation.evidence.logs && investigation.evidence.logs.length > 0) {
+            resultMessage += `**Logs:** ${investigation.evidence.logs.length} error messages\n`;
+          }
+          if (investigation.evidence.code_diff) {
+            resultMessage += `**Code:** ${investigation.evidence.code_diff.files?.length || 0} files analyzed\n`;
+          }
+          if (investigation.evidence.deployment) {
+            resultMessage += `**Deployment:** Recent deployment detected\n`;
+          }
+          resultMessage += '\n';
+        }
+      }
+
+      // Hypotheses (v2 format only)
+      if (investigation.hypotheses && investigation.hypotheses.length > 0) {
+        resultMessage += `### 🔬 Hypotheses\n\n`;
+        investigation.hypotheses.forEach((hyp: any, idx: number) => {
+          const status = hyp.status === 'verified' ? '✅' : hyp.status === 'rejected' ? '❌' : '⏳';
+          resultMessage += `${idx + 1}. ${status} ${hyp.statement} (${((hyp.confidence || 0) * 100).toFixed(0)}%)\n`;
+        });
+        resultMessage += '\n';
+      }
+
+      // Reasoning Steps (collapsed) - v1 format only
       if (investigation.reasoning_steps && investigation.reasoning_steps.length > 0) {
         resultMessage += `<details>\n<summary>Investigation Steps (${investigation.reasoning_steps.length})</summary>\n\n`;
         investigation.reasoning_steps.forEach((step: string, idx: number) => {
@@ -993,16 +1102,23 @@ export class DebugCopilot {
       this.updateLastMessage({
         type: 'ai',
         content: resultMessage,
-        timestamp: new Date(),
-        suggestedPrompts: [
-          investigation.suggested_fixes && investigation.suggested_fixes.length > 0 ? 'Create a PR with the fix' : 'Analyze other services',
-          'Run another investigation',
-          'Analyze other services'
-        ]
+        timestamp: new Date()
       });
 
       // Store investigation results in context
       this._errorAnalysisData = investigation;
+
+      // Show warnings if any
+      if (investigation.warnings && investigation.warnings.length > 0) {
+        this.addMessage({
+          type: 'system',
+          content: `**⚠️ System Warnings:**\n\n${investigation.warnings.map((w: string) => `• ${w}`).join('\n')}\n\nThese warnings indicate missing context that could improve investigation accuracy.`,
+          timestamp: new Date()
+        });
+      }
+
+      // Check if GitHub is connected - prompt if not
+      await this.checkGitHubConnectionAfterInvestigation();
 
     } catch (error: any) {
       console.error('[Tivra DebugMind] Investigation failed:', error);
@@ -1298,14 +1414,29 @@ export class DebugCopilot {
 
 
   /**
-   * Stop monitoring
+   * Stop autonomous monitoring (agent-side)
    */
-  private stopMonitoring() {
-    if (this._monitoringInterval) {
-      clearInterval(this._monitoringInterval);
-      this._monitoringInterval = null;
+  private async stopAutonomousMonitoring() {
+    if (!this._autonomousMonitoringActive) {
+      return;
     }
-    this._isMonitoring = false;
+
+    try {
+      // Call agent to stop monitoring
+      const services = this._awsServices.filter(s => s.logGroupName || s.logGroup);
+      for (const service of services) {
+        await axios.post(`${this._apiUrl}/api/sre-agent/stop-monitoring`, {
+          service_name: service.name
+        });
+      }
+
+      this._autonomousMonitoringActive = false;
+      this._isMonitoring = false;
+
+      console.log('[Tivra DebugMind] Autonomous monitoring stopped');
+    } catch (error: any) {
+      console.error('[Tivra DebugMind] Failed to stop autonomous monitoring:', error);
+    }
   }
 
   /**
@@ -1488,13 +1619,13 @@ export class DebugCopilot {
       return;
     }
 
-    // Check if user wants to start real-time monitoring
+    // Check if user wants to start autonomous monitoring
     if ((lowerText.includes('start') || lowerText.includes('enable')) &&
         (lowerText.includes('real-time') || lowerText.includes('realtime') ||
          lowerText.includes('live') || lowerText.includes('continuous') ||
-         lowerText.includes('monitor'))) {
+         lowerText.includes('monitor') || lowerText.includes('autonomous'))) {
       if (this._awsServices.length > 0) {
-        await this.startRealtimeMonitoring(this._awsServices);
+        await this.startAutonomousMonitoring(this._awsServices);
         return;
       } else {
         this.addMessage({
@@ -1506,14 +1637,14 @@ export class DebugCopilot {
       }
     }
 
-    // Check if user wants to stop real-time monitoring
+    // Check if user wants to stop autonomous monitoring
     if ((lowerText.includes('stop') || lowerText.includes('disable')) &&
         (lowerText.includes('monitor') || lowerText.includes('real-time') ||
-         lowerText.includes('realtime') || lowerText.includes('live'))) {
-      await this.stopRealtimeMonitoring();
+         lowerText.includes('realtime') || lowerText.includes('live') || lowerText.includes('autonomous'))) {
+      await this.stopAutonomousMonitoring();
       this.addMessage({
         type: 'ai',
-        content: `✅ **Real-time monitoring stopped**\n\nYou can restart monitoring anytime by asking me to "start real-time monitoring".`,
+        content: `✅ **Autonomous monitoring stopped**\n\nYou can restart monitoring anytime by asking me to "start monitoring".`,
         timestamp: new Date()
       });
       return;
@@ -1523,6 +1654,164 @@ export class DebugCopilot {
     if ((lowerText.includes('disconnect') || lowerText.includes('logout') || lowerText.includes('reset')) &&
         lowerText.includes('aws')) {
       await this.disconnectFromAWS();
+      return;
+    }
+
+    // Check if user wants to connect GitHub
+    if (lowerText.includes('connect github') || lowerText.includes('connect to github')) {
+      await this.startGitHubOAuth();
+      return;
+    }
+
+    // Check if user wants to retry GitHub connection
+    if (lowerText.includes('retry github') || lowerText.includes('check github status')) {
+      await this.checkGitHubConnection();
+      return;
+    }
+
+    // Check if user wants detailed error explanation
+    if (lowerText.includes('explain') && lowerText.includes('error')) {
+      await this.explainErrors();
+      return;
+    }
+
+    // Check if user wants to start investigation directly
+    if ((lowerText.includes('start') && lowerText.includes('investigation')) ||
+        lowerText === 'investigate') {
+      this.addMessage({
+        type: 'system',
+        content: `🤖 Starting unified investigation with SRE Agent...`,
+        timestamp: new Date()
+      });
+      await this.triggerSREInvestigation();
+      return;
+    }
+
+    // Check if user is providing feedback rating
+    if (this._pendingFeedbackSessionId && (text.includes('/5') || lowerText.includes('excellent') || lowerText.includes('good') || lowerText.includes('okay') || lowerText.includes('poor'))) {
+      await this.handleFeedbackRating(text);
+      return;
+    }
+
+    // Check if user wants to skip feedback
+    if (this._pendingFeedbackSessionId && lowerText.includes('skip feedback')) {
+      this._pendingFeedbackSessionId = null;
+      this.addMessage({
+        type: 'ai',
+        content: `No problem! You can always provide feedback later.`,
+        timestamp: new Date(),
+        suggestedPrompts: [
+          'Monitor new errors',
+          'Analyze another service'
+        ]
+      });
+      return;
+    }
+
+    // Check if user wants to skip
+    if ((lowerText.includes('skip') && !lowerText.includes('investigate')) ||
+        lowerText.includes('skip for now')) {
+      this.addMessage({
+        type: 'ai',
+        content: `⏭️ **Skipped**\n\nNo problem! You can investigate these errors later, or I can monitor for new errors.`,
+        timestamp: new Date(),
+        suggestedPrompts: [
+          'Monitor new errors',
+          'Analyze another service',
+          'Start investigation'
+        ]
+      });
+      return;
+    }
+
+    // Check if user wants to skip GitHub and proceed with investigation
+    if ((lowerText.includes('skip') && lowerText.includes('investigate')) ||
+        lowerText.includes('investigate without github')) {
+      this.addMessage({
+        type: 'system',
+        content: `🤖 Starting investigation without GitHub context...`,
+        timestamp: new Date()
+      });
+      await this.triggerSREInvestigation();
+      return;
+    }
+
+    // Check if user wants to investigate again (after validation/deployment)
+    if (lowerText.includes('investigate again') ||
+        (lowerText.includes('investigate') && lowerText.includes('again'))) {
+      if (this._conversationContext.service) {
+        this.addMessage({
+          type: 'system',
+          content: `🔄 Starting new investigation for ${this._conversationContext.service.name}...`,
+          timestamp: new Date()
+        });
+        await this.triggerSREInvestigation();
+      } else {
+        this.addMessage({
+          type: 'ai',
+          content: `⚠️ **No Service Context**\n\nI don't have a service to investigate. Please analyze your AWS services first.`,
+          timestamp: new Date(),
+          suggestedPrompts: ['Analyze my AWS services']
+        });
+      }
+      return;
+    }
+
+    // Check if user wants to monitor new errors (exit current flow and start autonomous monitoring)
+    if ((lowerText.includes('monitor') && lowerText.includes('new')) ||
+        lowerText.includes('monitor new errors') ||
+        lowerText.includes('check for new errors')) {
+      // Auto-start autonomous monitoring
+      if (this._awsServices.length > 0) {
+        await this.startAutonomousMonitoring(this._awsServices);
+      } else {
+        this.addMessage({
+          type: 'ai',
+          content: `⚠️ **No Services Available**\n\nPlease analyze your AWS services first, then I can start monitoring.`,
+          timestamp: new Date(),
+          suggestedPrompts: ['Analyze my AWS services']
+        });
+      }
+      return;
+    }
+
+    // Check if user wants to explain the fix
+    if (lowerText.includes('explain') && (lowerText.includes('fix') || lowerText.includes('solution'))) {
+      await this.explainLastFix();
+      return;
+    }
+
+    // Check if user wants to approve and create PR
+    if ((lowerText.includes('approve') && lowerText.includes('pr')) ||
+        (lowerText.includes('approve') && lowerText.includes('fix')) ||
+        lowerText.includes('create a pr') ||
+        lowerText.includes('create pr') ||
+        lowerText.includes('try again')) {
+      await this.approveAndCreatePR();
+      return;
+    }
+
+    // Check if user wants to validate deployment
+    if ((lowerText.includes('validate') && lowerText.includes('deployment')) ||
+        (lowerText.includes('check') && lowerText.includes('errors')) ||
+        (lowerText.includes('verify') && lowerText.includes('fix')) ||
+        (lowerText.includes('deployed') && (lowerText.includes('fix') || lowerText.includes('pr'))) ||
+        lowerText.includes('fix has been deployed') ||
+        lowerText.includes('deployment is complete') ||
+        lowerText.includes('i deployed')) {
+      await this.validateDeployment();
+      return;
+    }
+
+    // Check if user wants to skip GitHub (general)
+    if (lowerText.includes('skip for now') || lowerText.includes('skip github') ||
+        (lowerText.includes('skip') && lowerText.includes('connect'))) {
+      this.addMessage({
+        type: 'system',
+        content: `🤖 Proceeding with investigation (without GitHub context)...`,
+        timestamp: new Date()
+      });
+      await this.triggerSREInvestigation();
       return;
     }
 
@@ -2177,19 +2466,30 @@ export class DebugCopilot {
    */
   private async getGitHubRepoFromWorkspace(): Promise<string | undefined> {
     try {
+      // First, check if user has manually configured the GitHub repo
+      const configuredRepo = vscode.workspace.getConfiguration('tivra').get<string>('githubRepo');
+      if (configuredRepo && configuredRepo.trim()) {
+        console.log('[Tivra DebugMind] Using configured GitHub repo:', configuredRepo);
+        return configuredRepo.trim();
+      }
+
+      // Otherwise, try to auto-detect from git remote
       const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
       if (!workspaceFolder) {
+        console.log('[Tivra DebugMind] No workspace folder, cannot auto-detect GitHub repo');
         return undefined;
       }
 
       // Try to get git remote URL
       const gitExtension = vscode.extensions.getExtension('vscode.git')?.exports;
       if (!gitExtension) {
+        console.log('[Tivra DebugMind] Git extension not found, cannot auto-detect GitHub repo');
         return undefined;
       }
 
       const api = gitExtension.getAPI(1);
       if (!api.repositories || api.repositories.length === 0) {
+        console.log('[Tivra DebugMind] No git repositories found, cannot auto-detect GitHub repo');
         return undefined;
       }
 
@@ -2199,12 +2499,14 @@ export class DebugCopilot {
       // Look for origin remote
       const origin = remotes.find((r: any) => r.name === 'origin');
       if (!origin) {
+        console.log('[Tivra DebugMind] No origin remote found, cannot auto-detect GitHub repo');
         return undefined;
       }
 
       // Extract repo from URL (e.g., git@github.com:user/repo.git -> user/repo)
       const url = origin.fetchUrl || origin.pushUrl;
       if (!url) {
+        console.log('[Tivra DebugMind] No remote URL found, cannot auto-detect GitHub repo');
         return undefined;
       }
 
@@ -2214,21 +2516,25 @@ export class DebugCopilot {
       // SSH format: git@github.com:user/repo.git
       match = url.match(/git@github\.com:(.+?)\.git$/);
       if (match) {
+        console.log('[Tivra DebugMind] Auto-detected GitHub repo from SSH URL:', match[1]);
         return match[1];
       }
 
       // HTTPS format: https://github.com/user/repo.git
       match = url.match(/https:\/\/github\.com\/(.+?)\.git$/);
       if (match) {
+        console.log('[Tivra DebugMind] Auto-detected GitHub repo from HTTPS URL:', match[1]);
         return match[1];
       }
 
       // HTTPS without .git: https://github.com/user/repo
       match = url.match(/https:\/\/github\.com\/(.+?)$/);
       if (match) {
+        console.log('[Tivra DebugMind] Auto-detected GitHub repo from HTTPS URL (no .git):', match[1]);
         return match[1];
       }
 
+      console.log('[Tivra DebugMind] Could not parse GitHub repo from remote URL:', url);
       return undefined;
     } catch (error) {
       console.error('[Tivra DebugMind] Failed to get GitHub repo:', error);
@@ -2259,154 +2565,930 @@ export class DebugCopilot {
     }
   }
 
-  // ========================================
-  // Real-time Monitoring Methods
-  // ========================================
+  /**
+   * Check if GitHub is connected (returns boolean)
+   */
+  private async isGitHubConnected(): Promise<boolean> {
+    try {
+      const response = await axios.get(`${this._apiUrl}/api/github/status`);
+      return response.data.connected === true;
+    } catch (error) {
+      console.error('[Tivra DebugMind] Failed to check GitHub status:', error);
+      return false;
+    }
+  }
 
   /**
-   * Start real-time monitoring using polling (every 10 seconds)
+   * Check GitHub connection status and prompt if needed
    */
-  private async startRealtimeMonitoring(services: any[]) {
-    if (!services || services.length === 0) {
-      console.log('[Tivra DebugMind] No services to monitor');
+  private async checkGitHubConnection() {
+    try {
+      const response = await axios.get(`${this._apiUrl}/api/github/status`);
+
+      if (response.data.connected) {
+        console.log('[Tivra DebugMind] GitHub connected:', response.data.owner + '/' + response.data.repo);
+        this.addMessage({
+          type: 'ai',
+          content: `**GitHub Connected** ✅\n\nRepository: ${response.data.owner}/${response.data.repo}\nBranch: ${response.data.baseBranch}\n\nYou're all set! The SRE Agent will use this repository for code context during investigations.`,
+          timestamp: new Date()
+        });
+      } else {
+        // Not connected, prompt user
+        this.addMessage({
+          type: 'ai',
+          content: `**Connect to GitHub** 🔗\n\nFor better investigation accuracy, connect your GitHub repository. This allows the SRE Agent to:\n\n• Analyze recent code changes\n• Fetch source code for context\n• Generate accurate fixes\n• Create pull requests automatically\n\nYou can connect now or skip this step.`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Connect GitHub',
+            'Skip for now'
+          ]
+        });
+      }
+    } catch (error) {
+      console.error('[Tivra DebugMind] Failed to check GitHub status:', error);
+      // Don't show error to user, just log it
+    }
+  }
+
+  /**
+   * Check GitHub connection after investigation completes
+   * Only prompts if not connected, otherwise silent
+   */
+  private async checkGitHubConnectionAfterInvestigation() {
+    try {
+      const investigation = this._lastInvestigationResult;
+
+      // Check if file was located for fix
+      const fileLocated = investigation?.file_located || false;
+      const hasGitHub = !!this._githubData;
+
+      console.log('[Tivra DebugMind] File located:', fileLocated, 'GitHub connected:', hasGitHub);
+
+      // Complete workflow guidance
+      if (hasGitHub && fileLocated) {
+        // Perfect case: GitHub connected AND file located
+        this.addMessage({
+          type: 'ai',
+          content: `\n**✅ Investigation Complete - Ready for Fix**\n\n` +
+                  `**File Located:** \`${investigation.fix_file}\`\n` +
+                  `**Confidence:** ${((investigation.root_cause_confidence || 0) * 100).toFixed(0)}%\n\n` +
+                  `**Next Step:** Review the fix, then I'll create a PR for you.`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Approve and create PR'
+          ]
+        });
+      } else if (hasGitHub && !fileLocated) {
+        // GitHub connected but file not found
+        this.addMessage({
+          type: 'ai',
+          content: `\n**⚠️ Manual Fix Required**\n\n` +
+                  `I couldn't locate the exact file in your repository for this fix.\n\n` +
+                  `**Suggested Fix:**\n${investigation.suggested_fix || 'See investigation details above'}\n\n` +
+                  `**Next Step:** After you've implemented and deployed the fix, let me know.`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Fix has been deployed'
+          ]
+        });
+      } else {
+        // GitHub not connected
+        this.addMessage({
+          type: 'ai',
+          content: `\n**💡 Manual Fix Required (No GitHub Connected)**\n\n` +
+                  `GitHub is not connected, so you'll need to implement the fix manually.\n\n` +
+                  `**Next Step:** After you've implemented and deployed the fix, let me know.`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Fix has been deployed'
+          ]
+        });
+      }
+    } catch (error) {
+      console.error('[Tivra DebugMind] Failed to check GitHub status:', error);
+      // Don't show error to user, just log it
+    }
+  }
+
+  /**
+   * Explain errors in detail with analysis
+   */
+  private async explainErrors() {
+    if (!this._conversationContext.recentErrors || this._conversationContext.recentErrors.length === 0) {
+      this.addMessage({
+        type: 'ai',
+        content: '⚠️ **No Errors to Explain**\n\nPlease analyze your service first to find errors.',
+        timestamp: new Date(),
+        suggestedPrompts: ['Analyze my AWS services']
+      });
       return;
     }
 
-    console.log(`[Tivra DebugMind] Starting real-time monitoring for ${services.length} service(s)`);
-
-    // Start polling monitoring
-    this.startPollingMonitoring(services);
-  }
-
-  /**
-   * Start polling monitoring (every 10 seconds)
-   */
-  private startPollingMonitoring(services: any[]) {
-    console.log('[Tivra DebugMind] Starting polling mode (10s interval)');
+    const errors = this._conversationContext.recentErrors;
+    const serviceName = this._conversationContext.service?.name || 'your service';
 
     this.addMessage({
       type: 'system',
-      content: `🔄 **Monitoring started** (polling mode) for ${services.length} service(s)\n\nChecking for errors every 10 seconds.`,
+      content: `🔍 Analyzing error patterns and types...`,
       timestamp: new Date()
     });
 
-    // Initialize last poll time for each service
-    services.forEach(service => {
-      this._lastPollTime.set(service.name, Date.now());
+    // Build detailed error analysis
+    let analysis = `## 📊 Detailed Error Analysis for ${serviceName}\n\n`;
+
+    analysis += `### Error Overview\n`;
+    analysis += `Found **${errors.length} unique error types** with multiple occurrences.\n\n`;
+
+    // Group errors by type/pattern
+    const errorsByType: { [key: string]: any[] } = {};
+    errors.forEach(err => {
+      const errorType = err.type || 'Unknown';
+      if (!errorsByType[errorType]) {
+        errorsByType[errorType] = [];
+      }
+      errorsByType[errorType].push(err);
     });
 
-    // Poll every 10 seconds
-    this._pollingInterval = setInterval(async () => {
-      for (const service of services) {
-        await this.pollServiceLogs(service);
-      }
-    }, 10000);
+    analysis += `### Error Types Breakdown\n\n`;
+    Object.entries(errorsByType).forEach(([type, errs], index) => {
+      const totalCount = errs.reduce((sum, e) => sum + (e.count || 1), 0);
+      analysis += `**${index + 1}. ${type}** (${totalCount} occurrences)\n\n`;
+
+      errs.forEach((err, i) => {
+        analysis += `   **Error ${i + 1}:** ${err.message}\n`;
+        analysis += `   • Occurrences: ${err.count || 1}\n`;
+        if (err.lastSeen) {
+          analysis += `   • Last seen: ${new Date(err.lastSeen).toLocaleString()}\n`;
+        }
+        if (err.samples && err.samples.length > 0) {
+          const sample = err.samples[0].substring(0, 300);
+          analysis += `   • Sample:\n   \`\`\`\n   ${sample}${err.samples[0].length > 300 ? '...' : ''}\n   \`\`\`\n`;
+        }
+        analysis += '\n';
+      });
+    });
+
+    analysis += `### Recommended Next Steps\n\n`;
+    analysis += `Based on the error patterns, I recommend:\n\n`;
+    analysis += `1. **Start Investigation** - Run a full investigation to identify root causes\n`;
+    analysis += `2. **Review Recent Changes** - Check if any recent deployments correlate with error spikes\n`;
+    analysis += `3. **Monitor Trends** - Set up autonomous monitoring to catch future issues\n\n`;
+    analysis += `Would you like me to investigate these errors?`;
+
+    this.addMessage({
+      type: 'ai',
+      content: analysis,
+      timestamp: new Date(),
+      suggestedPrompts: [
+        'Start investigation',
+        'Skip for now',
+        'Monitor new errors'
+      ]
+    });
+
+    // Track error explanation
+    this._analytics?.trackFeatureUsage('investigation', 'errors_explained', {
+      errorCount: errors.length,
+      errorTypes: Object.keys(errorsByType).length
+    });
   }
 
   /**
-   * Poll logs for a single service
+   * Explain the last investigation's suggested fix
    */
-  private async pollServiceLogs(service: any) {
-    try {
-      const since = this._lastPollTime.get(service.name) || Date.now() - 60000;
+  private async explainLastFix() {
+    if (!this._lastInvestigationResult || !this._lastInvestigationResult.suggested_fixes ||
+        this._lastInvestigationResult.suggested_fixes.length === 0) {
+      this.addMessage({
+        type: 'ai',
+        content: '⚠️ **No Fix Available**\n\nThere are no fixes to explain. Please run an investigation first to get suggested fixes.',
+        timestamp: new Date(),
+        suggestedPrompts: ['Investigate my service', 'Analyze errors']
+      });
+      return;
+    }
 
-      const response = await axios.get(`${this._apiUrl}/api/aws/logs/poll`, {
-        params: {
-          serviceName: service.name,
-          serviceType: service.type,
-          logGroupName: service.logGroup,
-          since: since
-        }
+    const fix = this._lastInvestigationResult.suggested_fixes[0];
+    const rootCause = this._lastInvestigationResult.root_cause;
+
+    // Generate detailed explanation
+    let explanation = `## 🔍 Fix Explanation\n\n`;
+
+    // Problem section
+    if (rootCause) {
+      explanation += `### 🔴 The Problem\n`;
+      explanation += `**Root Cause:** ${rootCause.category.replace('_', ' ')}\n`;
+      explanation += `**Description:** ${rootCause.description}\n`;
+      explanation += `**Impact:** ${rootCause.impact}\n\n`;
+    }
+
+    // Solution section
+    explanation += `### ✅ The Solution\n`;
+    explanation += `**Fix Type:** ${fix.type.replace('_', ' ').toUpperCase()}\n`;
+    explanation += `**Description:** ${fix.description}\n`;
+    explanation += `**Risk Level:** ${fix.risk_level}\n`;
+    explanation += `**Estimated Time:** ${fix.estimated_time || '15-30 minutes'}\n\n`;
+
+    // Why it works
+    explanation += `### 💡 Why This Works\n`;
+    if (fix.explanation) {
+      explanation += `${fix.explanation}\n\n`;
+    } else {
+      explanation += `This fix addresses the root cause by ${fix.description.toLowerCase()}. `;
+      explanation += `It has a ${(fix.confidence * 100).toFixed(0)}% confidence score based on the evidence gathered.\n\n`;
+    }
+
+    // Implementation
+    if (fix.code || fix.implementation_steps) {
+      explanation += `### 🔧 Implementation\n`;
+      if (fix.code) {
+        explanation += `\`\`\`${fix.language || 'javascript'}\n${fix.code}\n\`\`\`\n\n`;
+      }
+      if (fix.implementation_steps) {
+        explanation += `**Steps:**\n`;
+        fix.implementation_steps.forEach((step: string, idx: number) => {
+          explanation += `${idx + 1}. ${step}\n`;
+        });
+        explanation += '\n';
+      }
+    }
+
+    // Impact section
+    explanation += `### 📊 Expected Impact\n`;
+    if (fix.impact) {
+      explanation += `${fix.impact}\n\n`;
+    } else {
+      explanation += `This fix should resolve the error and prevent future occurrences. Monitor logs after applying to verify.\n\n`;
+    }
+
+    // Alternatives
+    if (this._lastInvestigationResult.suggested_fixes.length > 1) {
+      explanation += `**Note:** There ${this._lastInvestigationResult.suggested_fixes.length - 1 === 1 ? 'is' : 'are'} ${this._lastInvestigationResult.suggested_fixes.length - 1} alternative fix${this._lastInvestigationResult.suggested_fixes.length - 1 === 1 ? '' : 'es'} available. Ask me to "show another fix option" to see them.\n\n`;
+    }
+
+    // Determine next steps based on context
+    const investigation = this._lastInvestigationResult;
+    const fileLocated = investigation?.file_located || false;
+    let prompts: string[];
+
+    if (this._githubData && fileLocated) {
+      // Can create PR automatically
+      prompts = ['Approve and create PR'];
+    } else {
+      // Manual fix required
+      prompts = ['Fix has been deployed'];
+    }
+
+    this.addMessage({
+      type: 'ai',
+      content: explanation,
+      timestamp: new Date(),
+      suggestedPrompts: prompts
+    });
+  }
+
+  /**
+   * Approve fix and create PR
+   */
+  private async approveAndCreatePR() {
+    if (!this._lastInvestigationResult) {
+      this.addMessage({
+        type: 'ai',
+        content: '⚠️ **No Investigation Found**\n\nPlease run an investigation first before creating a PR.',
+        timestamp: new Date(),
+        suggestedPrompts: ['Investigate my service']
+      });
+      return;
+    }
+
+    const investigation = this._lastInvestigationResult;
+    const sessionId = investigation.session_id || investigation.investigation_id;
+
+    // Check if GitHub is connected
+    if (!this._githubData) {
+      this.addMessage({
+        type: 'ai',
+        content: '⚠️ **GitHub Not Connected**\n\nPlease connect GitHub first to create PRs.',
+        timestamp: new Date(),
+        suggestedPrompts: ['Connect GitHub']
+      });
+      return;
+    }
+
+    // Check if file was located
+    if (!investigation.file_located || !investigation.fix_file) {
+      this.addMessage({
+        type: 'ai',
+        content: '⚠️ **Cannot Create PR**\n\nThe exact file for this fix was not located in your repository. Manual implementation is required.',
+        timestamp: new Date(),
+        suggestedPrompts: ['Show me the suggested fix', 'Investigate another service']
+      });
+      return;
+    }
+
+    try {
+      this.addMessage({
+        type: 'system',
+        content: '🔄 Creating PR...\n\n**Steps:**\n1️⃣ Approving fix\n2️⃣ Applying fix to code\n3️⃣ Creating branch\n4️⃣ Opening pull request',
+        timestamp: new Date()
       });
 
-      // Update last poll time
-      this._lastPollTime.set(service.name, response.data.lastCheck);
+      // Step 1: Approve fix
+      await axios.post(`${this._apiUrl}/api/sre-agent/v2/approve-fix`, {
+        session_id: sessionId,
+        approved: true,
+        user_feedback: 'Approved from VSCode'
+      });
 
-      // Handle new errors
-      if (response.data.errorCount > 0) {
-        this.handleLogUpdate(service.name, response.data);
+      // Step 2: Apply fix and create PR
+      const applyResponse = await axios.post(`${this._apiUrl}/api/sre-agent/v2/apply-fix`, {
+        session_id: sessionId,
+        dry_run: false
+      });
+
+      const result = applyResponse.data;
+
+      if (result.pr_link) {
+        // Open PR in browser automatically
+        vscode.env.openExternal(vscode.Uri.parse(result.pr_link));
+
+        this.addMessage({
+          type: 'ai',
+          content: `✅ **PR Created Successfully!**\n\n` +
+                  `**PR URL:** ${result.pr_link}\n\n` +
+                  `I've opened the PR in your browser.\n\n` +
+                  `**Manual Steps Required:**\n\n` +
+                  `1️⃣ **Review the PR** - Check the code changes on GitHub\n` +
+                  `2️⃣ **Merge the PR** - Approve and merge when ready\n` +
+                  `3️⃣ **Deploy the fix** - Deploy to your environment (production/staging)\n` +
+                  `4️⃣ **Tell me when deployed** - Let me know when deployment is complete\n\n` +
+                  `**Next Step:** After you've reviewed, merged, and deployed, let me know.`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Fix has been deployed',
+            'Monitor new errors'
+          ]
+        });
+      } else if (result.status === 'manual_action_required') {
+        // Manual config change or file not located - fetch full investigation to show details
+        const message = result.verification?.message || result.message || 'Manual intervention required';
+
+        // Fetch the investigation to get the full suggested fix details
+        try {
+          const invResponse = await axios.get(`${this._apiUrl}/api/sre-agent/v2/investigation/${sessionId}`);
+          const investigation = invResponse.data;
+
+          this.addMessage({
+            type: 'ai',
+            content: `⚙️ **Manual Configuration Change Required**\n\n` +
+                    `**Root Cause:**\n${investigation.root_cause || 'See analysis above'}\n\n` +
+                    `**Suggested Fix:**\n${investigation.suggested_fix || message}\n\n` +
+                    `**What to do:**\n` +
+                    `1️⃣ Apply the configuration change described above\n` +
+                    `2️⃣ Deploy the change to your environment\n` +
+                    `3️⃣ Let me know when deployed for validation`,
+            timestamp: new Date(),
+            suggestedPrompts: [
+              'Fix has been deployed',
+              'Monitor new errors'
+            ]
+          });
+        } catch (fetchError) {
+          // Fallback if we can't fetch investigation
+          this.addMessage({
+            type: 'ai',
+            content: `⚙️ **Manual Action Required**\n\n` +
+                    `${message}\n\n` +
+                    `**What to do:**\n` +
+                    `1️⃣ Review the suggested fix from the investigation\n` +
+                    `2️⃣ Apply the configuration change manually\n` +
+                    `3️⃣ Deploy the change to your environment\n` +
+                    `4️⃣ Let me know when deployed for validation`,
+            timestamp: new Date(),
+            suggestedPrompts: [
+              'Fix has been deployed',
+              'Monitor new errors'
+            ]
+          });
+        }
+      } else {
+        // Check if this is an old investigation format issue
+        if (result.status === 'error' && result.message?.includes('missing fix details')) {
+          this.addMessage({
+            type: 'ai',
+            content: `⚠️ **Investigation Format Out of Date**\n\n` +
+                    `This investigation was created with an older version and is missing required fields for PR creation.\n\n` +
+                    `**Solution:** Run a new investigation to get the latest format with all features.\n\n` +
+                    `${result.message}`,
+            timestamp: new Date(),
+            suggestedPrompts: [
+              'Start investigation',
+              'Monitor new errors'
+            ]
+          });
+        } else if (result.status === 'error' && result.message?.includes('Investigation format changes')) {
+          this.addMessage({
+            type: 'ai',
+            content: `⚠️ **Investigation Format Out of Date**\n\n` +
+                    `This investigation format has changed. Please run a new investigation.\n\n` +
+                    `${result.message}`,
+            timestamp: new Date(),
+            suggestedPrompts: [
+              'Start investigation',
+              'Monitor new errors'
+            ]
+          });
+        } else {
+          // Generic error message
+          this.addMessage({
+            type: 'ai',
+            content: `⚠️ **PR Creation Status: ${result.status}**\n\n${result.message || result.verification?.message || 'PR creation completed with warnings.'}`,
+            timestamp: new Date(),
+            suggestedPrompts: ['Monitor new errors']
+          });
+        }
       }
 
-    } catch (err: any) {
-      console.error(`[Tivra DebugMind] Error polling ${service.name}:`, err);
+    } catch (error: any) {
+      console.error('[Tivra DebugMind] Failed to create PR:', error);
+      this.addMessage({
+        type: 'ai',
+        content: `❌ **PR Creation Failed**\n\n${error.response?.data?.message || error.message}`,
+        timestamp: new Date(),
+        suggestedPrompts: ['Try again', 'Monitor new errors']
+      });
     }
   }
 
   /**
-   * Handle log update (from WebSocket or polling)
+   * Validate deployment after PR merge
    */
-  private handleLogUpdate(serviceName: string, data: any) {
-    console.log(`[Tivra DebugMind] Log update for ${serviceName}:`, data);
-
-    if (data.errorCount > 0) {
+  private async validateDeployment() {
+    if (!this._lastInvestigationResult) {
       this.addMessage({
         type: 'ai',
-        content: `📊 **New Errors Detected in ${serviceName}**\n\n` +
-                `Found ${data.errorCount} new error(s):\n\n` +
-                data.topErrors.slice(0, 3).map((err: any, i: number) =>
-                  `${i + 1}. **${err.message}** (${err.count} occurrences)`
-                ).join('\n'),
+        content: '⚠️ **No Investigation Found**\n\nPlease run an investigation first.',
+        timestamp: new Date(),
+        suggestedPrompts: ['Investigate my service']
+      });
+      return;
+    }
+
+    const investigation = this._lastInvestigationResult;
+    const sessionId = investigation.session_id || investigation.investigation_id;
+
+    try {
+      this.addMessage({
+        type: 'system',
+        content: '🔍 Validating deployment...\n\nChecking if errors are resolved (last 15 minutes)...',
+        timestamp: new Date()
+      });
+
+      const validateResponse = await axios.post(`${this._apiUrl}/api/sre-agent/v2/validate-deployment`, {
+        session_id: sessionId,
+        lookback_minutes: 15
+      });
+
+      const result = validateResponse.data;
+
+      if (result.errors_resolved) {
+        // Errors resolved - store learnings
+        await axios.post(`${this._apiUrl}/api/sre-agent/v2/store-learnings`, {
+          session_id: sessionId,
+          resolved: true
+        });
+
+        this.addMessage({
+          type: 'ai',
+          content: `✅ **Deployment Validated Successfully!**\n\n` +
+                  `${result.message}\n\n` +
+                  `**Error Reduction:**\n` +
+                  `• Before: ${result.error_count_before} errors\n` +
+                  `• After: ${result.error_count_after} errors\n` +
+                  `• Reduction: ${result.reduction_percentage.toFixed(0)}%\n\n` +
+                  `**Investigation Complete!**\n` +
+                  `This investigation has been stored for future reference.`,
+          timestamp: new Date()
+        });
+
+        // Request user feedback
+        this.addMessage({
+          type: 'ai',
+          content: `## 📊 Quick Feedback\n\n` +
+                  `How would you rate this investigation?`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            '⭐⭐⭐⭐⭐ Excellent (5/5)',
+            '⭐⭐⭐⭐ Good (4/5)',
+            '⭐⭐⭐ Okay (3/5)',
+            '⭐⭐ Poor (2/5)',
+            '⭐ Very Poor (1/5)',
+            'Skip feedback'
+          ]
+        });
+
+        // Store session ID for feedback submission
+        this._pendingFeedbackSessionId = sessionId;
+      } else {
+        this.addMessage({
+          type: 'ai',
+          content: `⚠️ **Errors Still Present**\n\n` +
+                  `${result.message}\n\n` +
+                  `**Error Counts:**\n` +
+                  `• Before: ${result.error_count_before} errors\n` +
+                  `• After: ${result.error_count_after} errors\n` +
+                  `• Reduction: ${result.reduction_percentage?.toFixed(0) || 0}%\n\n` +
+                  `**Recommendation:** ${result.recommendation}\n\n` +
+                  `**Recent Errors:**\n${result.recent_errors?.slice(0, 3).map((e: string) => `• ${e}`).join('\n') || 'No samples available'}`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Investigate again',
+            'Monitor new errors'
+          ]
+        });
+      }
+
+    } catch (error: any) {
+      console.error('[Tivra DebugMind] Failed to validate deployment:', error);
+      this.addMessage({
+        type: 'ai',
+        content: `❌ **Validation Failed**\n\n${error.response?.data?.message || error.message}\n\nPlease ensure the deployment is complete and try again.`,
+        timestamp: new Date(),
+        suggestedPrompts: ['Try validation again', 'Monitor new errors']
+      });
+    }
+  }
+
+  /**
+   * Handle user feedback rating
+   */
+  private async handleFeedbackRating(ratingText: string) {
+    // Parse rating from text
+    let rating = 0;
+    if (ratingText.includes('5/5') || ratingText.toLowerCase().includes('excellent')) {
+      rating = 5;
+    } else if (ratingText.includes('4/5') || ratingText.toLowerCase().includes('good')) {
+      rating = 4;
+    } else if (ratingText.includes('3/5') || ratingText.toLowerCase().includes('okay')) {
+      rating = 3;
+    } else if (ratingText.includes('2/5') || ratingText.toLowerCase().includes('poor (2')) {
+      rating = 2;
+    } else if (ratingText.includes('1/5') || ratingText.toLowerCase().includes('very poor')) {
+      rating = 1;
+    }
+
+    if (rating === 0) {
+      this.addMessage({
+        type: 'ai',
+        content: `I didn't understand that rating. Please select one of the options above.`,
+        timestamp: new Date()
+      });
+      return;
+    }
+
+    const sessionId = this._pendingFeedbackSessionId;
+    this._pendingFeedbackSessionId = null;
+
+    if (!sessionId) {
+      return;
+    }
+
+    try {
+      // Submit feedback to backend
+      const response = await axios.post(`${this._apiUrl}/api/sre-agent/v2/submit-feedback`, {
+        session_id: sessionId,
+        satisfaction_rating: rating
+      });
+
+      this.addMessage({
+        type: 'ai',
+        content: `✅ ${response.data.message || 'Thank you for your feedback!'}\n\n` +
+                `Your feedback helps us improve the debugging experience.`,
         timestamp: new Date(),
         suggestedPrompts: [
-          `Analyze errors in ${serviceName}`,
-          'Show detailed root cause analysis',
-          'Suggest a fix'
+          'Monitor new errors',
+          'Analyze another service'
+        ]
+      });
+
+      console.log(`[Tivra DebugMind] Feedback submitted: ${rating}/5 for session ${sessionId}`);
+
+    } catch (error: any) {
+      console.error('[Tivra DebugMind] Failed to submit feedback:', error);
+
+      // Still thank the user even if submission fails
+      this.addMessage({
+        type: 'ai',
+        content: `Thank you for your feedback (${rating}/5)!\n\n` +
+                `Note: Feedback could not be saved due to a connection issue, but we appreciate your input.`,
+        timestamp: new Date(),
+        suggestedPrompts: [
+          'Monitor new errors',
+          'Analyze another service'
         ]
       });
     }
   }
 
   /**
-   * Handle error alert (critical errors)
+   * Start GitHub OAuth flow
    */
-  private handleErrorAlert(serviceName: string, data: any) {
-    console.log(`[Tivra DebugMind] Error alert for ${serviceName}:`, data);
-
+  private async startGitHubOAuth() {
     this.addMessage({
-      type: 'ai',
-      content: `🚨 **Critical Alert: ${serviceName}**\n\n` +
-              `${data.message}\n\n` +
-              `**Top Errors:**\n` +
-              data.topErrors.slice(0, 3).map((err: any, i: number) =>
-                `${i + 1}. ${err.message} (${err.count} occurrences)`
-              ).join('\n'),
-      timestamp: new Date(),
-      suggestedPrompts: [
-        'Perform immediate root cause analysis',
-        'What can I do right now to fix this?',
-        'Show me the error details'
-      ]
+      type: 'system',
+      content: `🔄 Opening GitHub OAuth in your browser...`,
+      timestamp: new Date()
     });
 
-    // Show VS Code notification
-    vscode.window.showErrorMessage(
-      `Tivra DebugMind: Critical errors detected in ${serviceName} (${data.errorCount} errors)`,
-      'View Details'
-    ).then(selection => {
-      if (selection === 'View Details') {
-        this._panel.reveal();
-      }
-    });
+    try {
+      // Generate unique state token for polling
+      const state = `vscode-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+      // Open OAuth URL in browser with state
+      const authUrl = `${this._apiUrl}/api/github/auth?vscode_state=${state}`;
+      await vscode.env.openExternal(vscode.Uri.parse(authUrl));
+
+      this.addMessage({
+        type: 'system',
+        content: `🔄 Polling for GitHub authorization...`,
+        timestamp: new Date()
+      });
+
+      // Poll for connection status with state token
+      this.pollForGitHubConnection(state);
+    } catch (error: any) {
+      console.error('[Tivra DebugMind] GitHub OAuth failed:', error);
+      this.addMessage({
+        type: 'ai',
+        content: `⚠️ **GitHub OAuth Error**\n\nFailed to start OAuth flow: ${error.message}\n\nYou can try again later or skip this step.`,
+        timestamp: new Date(),
+        suggestedPrompts: [
+          'Retry GitHub',
+          'Skip for now'
+        ]
+      });
+    }
   }
 
   /**
-   * Stop real-time monitoring
+   * Poll for GitHub connection status using state token
    */
-  private async stopRealtimeMonitoring() {
-    console.log('[Tivra DebugMind] Stopping real-time monitoring');
+  private async pollForGitHubConnection(state: string) {
+    let attempts = 0;
+    const maxAttempts = 60; // 60 seconds
 
-    // Stop polling
-    if (this._pollingInterval) {
-      clearInterval(this._pollingInterval);
-      this._pollingInterval = null;
+    console.log(`[Tivra DebugMind] Polling for GitHub OAuth completion with state: ${state}`);
+
+    const poll = setInterval(async () => {
+      attempts++;
+
+      try {
+        // Poll the specific endpoint with state token
+        const response = await axios.get(`${this._apiUrl}/api/github/auth/poll/${state}`);
+
+        if (response.data.connected) {
+          clearInterval(poll);
+
+          console.log('[Tivra DebugMind] GitHub OAuth completed successfully');
+
+          // Store GitHub data for use in investigations
+          this._githubData = {
+            token: response.data.githubToken,
+            owner: response.data.owner,
+            repo: response.data.repo,
+            baseBranch: response.data.baseBranch,
+            user: response.data.user
+          };
+
+          // Persist to VSCode globalState so it survives reloads
+          await this._context.globalState.update('tivra_github_data', this._githubData);
+
+          console.log(`[Tivra DebugMind] Stored GitHub data: ${this._githubData.owner}/${this._githubData.repo}`);
+
+          this.addMessage({
+            type: 'ai',
+            content: `✅ **GitHub Connected Successfully!**\n\nRepository: ${response.data.owner}/${response.data.repo}\nBranch: ${response.data.baseBranch}\n\nThe SRE Agent will now use this repository for code analysis during investigations.`,
+            timestamp: new Date()
+          });
+
+          // If we're in the investigation flow, proceed with investigation
+          if (this._conversationContext.recentErrors.length > 0) {
+            this.addMessage({
+              type: 'system',
+              content: `🤖 Starting deep investigation with GitHub context...`,
+              timestamp: new Date()
+            });
+            await this.triggerSREInvestigation();
+          }
+        }
+      } catch (error) {
+        console.error('[Tivra DebugMind] Poll error:', error);
+      }
+
+      if (attempts >= maxAttempts) {
+        clearInterval(poll);
+        this.addMessage({
+          type: 'ai',
+          content: `⚠️ **GitHub Authorization Not Detected**\n\nDidn't receive authorization after 60 seconds. This could mean:\n• OAuth flow was cancelled\n• Authorization wasn't completed\n• Network connectivity issue\n\nWould you like to try again or proceed without GitHub?`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Connect GitHub',
+            'Skip - Investigate without GitHub'
+          ]
+        });
+      }
+    }, 1000); // Check every second
+  }
+
+  // ========================================
+  // Autonomous Monitoring Methods (Agent-Side)
+  // ========================================
+
+  /**
+   * Start autonomous monitoring (agent-side, no polling)
+   * Called once when AWS connection is established
+   */
+  private async startAutonomousMonitoring(services: any[]) {
+    if (!services || services.length === 0) {
+      console.log('[Tivra DebugMind] No services to monitor');
+      this.addMessage({
+        type: 'ai',
+        content: `⚠️ **No Services Available**\n\nPlease analyze your AWS services first, then I can start monitoring.`,
+        timestamp: new Date(),
+        suggestedPrompts: ['Analyze my AWS services']
+      });
+      return;
     }
 
-    this._lastPollTime.clear();
+    console.log(`[Tivra DebugMind] Starting autonomous monitoring for ${services.length} service(s)`);
+
+    this.addMessage({
+      type: 'system',
+      content: `🔄 Starting autonomous monitoring for new errors...`,
+      timestamp: new Date()
+    });
+
+    // Filter services that have log groups configured (check both logGroupName and logGroup)
+    const servicesWithLogs = services.filter((s: any) => s.logGroupName || s.logGroup);
+
+    if (servicesWithLogs.length === 0) {
+      console.log('[Tivra DebugMind] No services with log groups configured');
+      this.addMessage({
+        type: 'ai',
+        content: `⚠️ **No Log Groups Configured**\n\n` +
+                `None of your ${services.length} service(s) have log groups configured. ` +
+                `To start autonomous monitoring, I need services with CloudWatch log groups.\n\n` +
+                `**What to do:**\n` +
+                `• Analyze services with log groups (Lambda, ECS, etc.)\n` +
+                `• For EC2 instances, provide the CloudWatch log group name when prompted\n\n` +
+                `Would you like to analyze your services again?`,
+        timestamp: new Date(),
+        suggestedPrompts: ['Analyze my AWS services', 'Show me how to configure log groups']
+      });
+      return;
+    }
+
+    this.addMessage({
+      type: 'system',
+      content: `🤖 **Autonomous Monitoring Started**\n\n` +
+              `Checking ${servicesWithLogs.length} service(s) for errors...`,
+      timestamp: new Date()
+    });
+
+    try {
+      // Fetch errors for each service (without auto-investigation)
+      let servicesChecked = 0;
+      let servicesWithErrors = 0;
+      let allErrors: any[] = [];
+
+      for (const service of servicesWithLogs) {
+        this.addMessage({
+          type: 'system',
+          content: `🔍 Checking ${service.name} for errors...`,
+          timestamp: new Date()
+        });
+
+        try {
+          const response = await axios.post(`${this._apiUrl}/api/sre-agent/fetch-errors`, {
+            service: {
+              name: service.name,
+              logGroupName: service.logGroupName || service.logGroup,
+              region: service.region || 'us-east-1',
+              type: service.type
+            },
+            lookback_minutes: 60
+          });
+
+          servicesChecked++;
+
+          // Check if errors were found
+          if (response.data.status === 'errors_found') {
+            servicesWithErrors++;
+            const errorData = response.data;
+
+            // Store errors in context for later investigation
+            allErrors.push({
+              service: service.name,
+              errors: errorData.errors,
+              errorSummary: errorData.error_summary,
+              totalErrors: errorData.total_errors
+            });
+
+            // Show brief error summary for this service
+            let errorMessage = `## ⚠️ Errors Found: ${service.name}\n\n`;
+            errorMessage += `**Total Errors:** ${errorData.total_errors}\n`;
+            errorMessage += `**Error Types:** ${Object.keys(errorData.error_summary).length}\n\n`;
+
+            // Show top 3 error types
+            const topErrors = Object.entries(errorData.error_summary)
+              .sort((a: any, b: any) => b[1].count - a[1].count)
+              .slice(0, 3);
+
+            errorMessage += `**Top Error Types:**\n`;
+            topErrors.forEach(([type, info]: [string, any], idx) => {
+              errorMessage += `${idx + 1}. **${type}** (${info.count} occurrences)\n`;
+            });
+
+            this.addMessage({
+              type: 'system',
+              content: errorMessage,
+              timestamp: new Date()
+            });
+
+          } else if (response.data.status === 'no_errors') {
+            this.addMessage({
+              type: 'system',
+              content: `✅ ${service.name}: No errors found`,
+              timestamp: new Date()
+            });
+          }
+
+          console.log(`[Tivra DebugMind] Completed error check for ${service.name}`);
+
+        } catch (serviceError: any) {
+          console.error(`[Tivra DebugMind] Error check failed for ${service.name}:`, serviceError);
+          this.addMessage({
+            type: 'system',
+            content: `⚠️ ${service.name}: Error check failed - ${serviceError.message}`,
+            timestamp: new Date()
+          });
+        }
+      }
+
+      // Store errors in conversation context for later use
+      if (allErrors.length > 0) {
+        this._conversationContext.recentErrors = allErrors.flatMap(s =>
+          s.errors.map((e: any) => ({ ...e, service: s.service }))
+        );
+      }
+
+      // Summary with two-path prompts
+      if (servicesWithErrors > 0) {
+        this.addMessage({
+          type: 'ai',
+          content: `## 🤖 Autonomous Monitoring Complete\n\n` +
+                  `✅ Checked ${servicesChecked} service(s)\n` +
+                  `⚠️ Found errors in ${servicesWithErrors} service(s)\n\n` +
+                  `**What would you like to do next?**\n` +
+                  `• **Explain errors in detail** - Get detailed analysis of error patterns\n` +
+                  `• **Start investigation** - Run full investigation and get fix suggestions\n` +
+                  `• **Skip for now** - Continue monitoring without investigation`,
+          timestamp: new Date(),
+          suggestedPrompts: [
+            'Explain errors in detail',
+            'Start investigation',
+            'Skip for now'
+          ]
+        });
+      } else {
+        this.addMessage({
+          type: 'ai',
+          content: `## 🤖 Autonomous Monitoring Complete\n\n` +
+                  `✅ Checked ${servicesChecked} service(s)\n` +
+                  `✅ All services are healthy! No errors detected.\n\n` +
+                  `I'll continue monitoring your services.`,
+          timestamp: new Date(),
+          suggestedPrompts: ['Monitor new errors', 'Analyze another service']
+        });
+      }
+
+      this._autonomousMonitoringActive = true;
+      this._isMonitoring = false; // One-time check completed
+
+    } catch (error: any) {
+      console.error('[Tivra DebugMind] Failed to start autonomous monitoring:', error);
+
+      this.addMessage({
+        type: 'system',
+        content: `❌ Failed to start autonomous monitoring: ${error.message}\n\n` +
+                `You can still manually trigger investigations.`,
+        timestamp: new Date()
+      });
+    }
   }
 
   public async dispose() {
-    this.stopMonitoring();
-    await this.stopRealtimeMonitoring();
+    await this.stopAutonomousMonitoring();
 
     // Destroy encryption session
     if (this._encryption) {
@@ -2439,7 +3521,7 @@ interface CodeFix {
 }
 
 interface ConversationContext {
-  service: { name: string; type: string; logGroupName?: string } | null;
+  service: { name: string; type: string; logGroupName?: string; region?: string } | null;
   recentErrors: any[];
   appliedFixes: Array<{ filePath: string; code: string; description: string; timestamp?: Date }>;
   conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>;
