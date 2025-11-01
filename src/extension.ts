@@ -44,7 +44,7 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('tivra.openCopilot', async () => {
       analytics?.trackFunnelStep('copilot_opened');
       analytics?.trackFeatureUsage('copilot', 'open');
-      copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl, credentialManager, analytics);
+      copilot = DebugCopilot.createOrShow(context.extensionUri, context, apiUrl, credentialManager, analytics);
     })
   );
 
@@ -77,7 +77,7 @@ export async function activate(context: vscode.ExtensionContext) {
 async function startDebugging(context: vscode.ExtensionContext) {
   // Open copilot if not already open
   if (!copilot) {
-    copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl, credentialManager, analytics);
+    copilot = DebugCopilot.createOrShow(context.extensionUri, context, apiUrl, credentialManager, analytics);
   }
 
   // Ask user to select service
@@ -159,7 +159,7 @@ function showWelcomeMessage(context: vscode.ExtensionContext) {
     if (choice === 'Connect to AWS') {
       vscode.commands.executeCommand('tivra.connectAWS');
     } else if (choice === 'Open Copilot') {
-      copilot = DebugCopilot.createOrShow(context.extensionUri, apiUrl, credentialManager, analytics);
+      copilot = DebugCopilot.createOrShow(context.extensionUri, context, apiUrl, credentialManager, analytics);
     }
   });
 }

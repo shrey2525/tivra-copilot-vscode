@@ -159,49 +159,11 @@ export class TivraClient {
     }
   }
 
-  async proposeFix(
-    serviceName: string,
-    serviceType: string,
-    analysis: ServiceAnalysis,
-    githubOwner: string,
-    githubRepo: string
-  ): Promise<any> {
-    try {
-      const response = await this.client.post('/api/aws/propose-fix', {
-        serviceName,
-        serviceType,
-        analysis,
-        githubOwner,
-        githubRepo
-      });
-      return response.data;
-    } catch (error) {
-      console.error('Propose fix failed:', error);
-      return null;
-    }
-  }
-
-  async createPR(
-    serviceName: string,
-    serviceType: string,
-    fix: any,
-    githubOwner: string,
-    githubRepo: string,
-    analysis: ServiceAnalysis
-  ): Promise<any> {
-    try {
-      const response = await this.client.post('/api/aws/create-pr', {
-        serviceName,
-        serviceType,
-        fix,
-        githubOwner,
-        githubRepo,
-        analysis
-      });
-      return response.data;
-    } catch (error) {
-      console.error('Create PR failed:', error);
-      return null;
-    }
-  }
+  // REMOVED: proposeFix() and createPR() methods
+  // These called old duplicate endpoints (/api/aws/propose-fix, /api/aws/create-pr)
+  // Use the unified SRE agent flow instead:
+  // 1. POST /api/sre-agent/investigate (Steps 1-5: Trigger → Context → RCA → Fix)
+  // 2. POST /api/v2/approve-fix (Step 6: Human approval)
+  // 3. POST /api/v2/apply-fix (Step 7: Apply fix & create PR)
+  // 4. POST /api/v2/store-learnings (Step 8: Store in Debug Memory)
 }
