@@ -44,6 +44,7 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('tivra.openCopilot', async () => {
       analytics?.trackFunnelStep('copilot_opened');
       analytics?.trackFeatureUsage('copilot', 'open');
+
       copilot = DebugCopilot.createOrShow(context.extensionUri, context, apiUrl, credentialManager, analytics);
     })
   );
